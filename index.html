@@ -878,7 +878,7 @@
     // Keep module data in separate IndexedDB records so one module cannot
     // overwrite another module's state. The fixture JSON cache remains separate.
     const APP_DB_NAME = "ntlApplication";
-    const APP_DB_VERSION = 1;
+    const APP_DB_VERSION = 2;
     let appDatabasePromise = null;
 
     function openAppDatabase() {
@@ -900,6 +900,10 @@
 
           if (!database.objectStoreNames.contains("appMeta")) {
             database.createObjectStore("appMeta", { keyPath: "key" });
+          }
+
+          if (!database.objectStoreNames.contains("sessionHistory")) {
+            database.createObjectStore("sessionHistory", { keyPath: "id" });
           }
         };
 
@@ -942,12 +946,26 @@
       }));
     }
 
+    // Storage policy: overwrite one current-state record per module; completed
+    // history is separately retained for 30 days and capped at 5 MB.
+    const STORAGE_POLICY = Object.freeze({
+      maxModuleStateBytes: 1024 * 1024,
+      maxHistoryBytes: 5 * 1024 * 1024,
+      historyRetentionDays: 30
+    });
+
+    function approximateBytes(value) {
+      return new Blob([JSON.stringify(value)]).size;
+    }
+
     const AppPersistence = Object.freeze({
       saveModuleState(moduleName, state) {
         if (!["coinToss", "tournamentTimer"].includes(moduleName)) {
           return Promise.reject(new Error(`Unknown application module: ${moduleName}`));
         }
-
+        if (approximateBytes(state) > STORAGE_POLICY.maxModuleStateBytes) {
+          return Promise.reject(new Error(`Module state exceeds ${STORAGE_POLICY.maxModuleStateBytes} byte limit.`));
+        }
         return runAppStoreRequest("moduleState", "readwrite", store =>
           store.put({ module: moduleName, state, savedAt: Date.now() })
         );
@@ -957,7 +975,6 @@
         if (!["coinToss", "tournamentTimer"].includes(moduleName)) {
           return Promise.reject(new Error(`Unknown application module: ${moduleName}`));
         }
-
         return runAppStoreRequest("moduleState", "readonly", store => store.get(moduleName));
       },
 
@@ -971,19 +988,53 @@
         return runAppStoreRequest("appMeta", "readonly", store => store.get(key));
       },
 
+      deleteMeta(key) {
+        return runAppStoreRequest("appMeta", "readwrite", store => store.delete(key));
+      },
+
+      async saveCompletedSession(session) {
+        const record = { ...session, completedAt: session.completedAt || Date.now() };
+        const uniqueId = (crypto.randomUUID && crypto.randomUUID()) || `${record.completedAt}-${Math.random().toString(36).slice(2)}`;
+        record.id = record.id || `session-${uniqueId}`;
+        if (approximateBytes(record) > STORAGE_POLICY.maxHistoryBytes) {
+          throw new Error("Completed session is too large to store.");
+        }
+        await runAppStoreRequest("sessionHistory", "readwrite", store => store.put(record));
+        await this.cleanup();
+        return record.id;
+      },
+
+      async loadSessionHistory() {
+        return runAppStoreRequest("sessionHistory", "readonly", store => store.getAll());
+      },
+
+      async cleanup() {
+        const history = await this.loadSessionHistory();
+        const cutoff = Date.now() - STORAGE_POLICY.historyRetentionDays * 24 * 60 * 60 * 1000;
+        const ordered = history.sort((a, b) => (a.completedAt || 0) - (b.completedAt || 0));
+        let totalBytes = ordered.reduce((sum, item) => sum + approximateBytes(item), 0);
+        const removeIds = [];
+        for (const item of ordered) {
+          if ((item.completedAt || 0) < cutoff || totalBytes > STORAGE_POLICY.maxHistoryBytes) {
+            removeIds.push(item.id);
+            totalBytes -= approximateBytes(item);
+          }
+        }
+        for (const id of removeIds) {
+          await runAppStoreRequest("sessionHistory", "readwrite", store => store.delete(id));
+        }
+        return { removed: removeIds.length, remaining: history.length - removeIds.length, bytes: totalBytes };
+      },
+
       async test() {
         const testKey = "__persistence_diagnostic__";
         const testValue = `test-${Date.now()}`;
-
         await this.saveMeta(testKey, testValue);
         const stored = await this.loadMeta(testKey);
-        await runAppStoreRequest("appMeta", "readwrite", store => store.delete(testKey));
-
-        if (stored?.value !== testValue) {
-          throw new Error("Saved data could not be read back correctly.");
-        }
-
-        return true;
+        await this.deleteMeta(testKey);
+        if (stored?.value !== testValue) throw new Error("Saved data could not be read back correctly.");
+        const cleanup = await this.cleanup();
+        return { passed: true, cleanup };
       }
     });
 
@@ -1003,6 +1054,95 @@
     const importStatusEl = document.getElementById("importStatus");
 
     document.getElementById("headerDate").textContent = `Coin Toss Date: ${CURRENT_DATE_STR}`;
+
+    /* =========================================================
+       1B. COIN TOSS SESSION SAVE / RESTORE
+       ========================================================= */
+
+    let stateSaveTimer = null;
+    let restoringCoinTossState = false;
+
+    function serialiseFixtures(fixtures) {
+      return fixtures.map(fixture => ({
+        dateStr: fixture.dateStr || "",
+        dateISO: fixture.dateObj instanceof Date && !Number.isNaN(fixture.dateObj.getTime())
+          ? fixture.dateObj.toISOString() : null,
+        kickoff: fixture.kickoff || "",
+        teamA: fixture.teamA || "",
+        teamB: fixture.teamB || "",
+        division: fixture.division || "",
+        winner: fixture.winner || null
+      }));
+    }
+
+    function deserialiseFixtures(fixtures) {
+      if (!Array.isArray(fixtures)) return [];
+      return fixtures.map(fixture => ({
+        dateStr: fixture.dateStr || "",
+        dateObj: fixture.dateISO ? new Date(fixture.dateISO) : parseDateString(fixture.dateStr),
+        kickoff: fixture.kickoff || "",
+        teamA: fixture.teamA || "",
+        teamB: fixture.teamB || "",
+        division: fixture.division || "",
+        winner: fixture.winner || null
+      }));
+    }
+
+    function scheduleCoinTossSave() {
+      if (restoringCoinTossState) return;
+      clearTimeout(stateSaveTimer);
+      stateSaveTimer = setTimeout(() => saveCoinTossState().catch(error =>
+        console.warn("Unable to save Coin Toss state:", error)
+      ), 250);
+    }
+
+    async function saveCoinTossState() {
+      const state = {
+        schemaVersion: 1,
+        savedAt: Date.now(),
+        competition: currentCompetition,
+        divisions: currentDivisions,
+        scope: currentScope,
+        winnerLabelMode,
+        manualInput: inputEl.value,
+        fixtures: serialiseFixtures(allParsedFixtures)
+      };
+      await AppPersistence.saveModuleState("coinToss", state);
+    }
+
+    async function restoreCoinTossState() {
+      const record = await AppPersistence.loadModuleState("coinToss");
+      if (!record?.state || record.state.schemaVersion !== 1) return false;
+      const state = record.state;
+      restoringCoinTossState = true;
+      try {
+        currentCompetition = state.competition || "";
+        currentDivisions = Array.isArray(state.divisions) ? state.divisions.map(String) : [];
+        currentScope = ["next", "upcoming", "season"].includes(state.scope) ? state.scope : "upcoming";
+        winnerLabelMode = state.winnerLabelMode === "Coin Toss Winner" ? state.winnerLabelMode : "Tap Off Winner";
+        inputEl.value = state.manualInput || "";
+        allParsedFixtures = deserialiseFixtures(state.fixtures);
+
+        if (currentCompetition && fixtureDatabase.length) {
+          leagueSelectEl.value = currentCompetition;
+          populateDivisionOptions();
+          divisionOptionsEl.querySelectorAll("input[type='checkbox']").forEach(box => {
+            box.checked = currentDivisions.includes(box.value);
+          });
+          updateImportButton();
+        }
+
+        document.querySelectorAll("#scopeGroup button").forEach(button => {
+          button.classList.toggle("active", button.dataset.scope === currentScope);
+        });
+        document.getElementById("btnToggleLabel").textContent = `Label: ${winnerLabelMode}`;
+        updateHeader();
+        applyScopeFilter();
+        return true;
+      } finally {
+        restoringCoinTossState = false;
+      }
+    }
 
     /* =========================================================
        2. DATE AND MANUAL FIXTURE PARSING
@@ -1205,6 +1345,7 @@
         visibleFixtures[index].winner = pickWinner(visibleFixtures[index]);
         slot.innerHTML = `<span class="winner-pill">${esc(winnerDisplayName(visibleFixtures[index].winner))}</span>`;
         coin.classList.remove("flipping");
+        scheduleCoinTossSave();
       }, 820);
     }
 
@@ -1250,6 +1391,7 @@
       }
 
       isAnimating = false;
+      scheduleCoinTossSave();
     }
 
     document.getElementById("btnFlipAnimated").addEventListener("click", runAnimated);
@@ -1262,6 +1404,7 @@
         document.getElementById(`slot-${index}`).innerHTML =
           `<span class="winner-pill">${esc(winnerDisplayName(fixture.winner))}</span>`;
       });
+      scheduleCoinTossSave();
     });
 
     document.getElementById("btnResetToss").addEventListener("click", () => {
@@ -1273,6 +1416,7 @@
       });
 
       viewportEl.scrollTo({ top: 0, behavior: "smooth" });
+      scheduleCoinTossSave();
     });
 
     /* =========================================================
@@ -1325,6 +1469,7 @@
       document.querySelectorAll(".winner-label").forEach(element => {
         element.textContent = winnerLabelMode;
       });
+      scheduleCoinTossSave();
     });
 
     document.querySelectorAll("#scopeGroup button").forEach(button => {
@@ -1335,6 +1480,7 @@
         button.classList.add("active");
         currentScope = button.dataset.scope;
         applyScopeFilter();
+        scheduleCoinTossSave();
       });
     });
 
@@ -1650,6 +1796,7 @@
 
       updateHeader();
       applyScopeFilter();
+      scheduleCoinTossSave();
 
       importStatusEl.textContent =
         `Imported ${importedFixtures.length} fixtures across ${currentDivisions.length} division(s) from ${currentCompetition}.`;
@@ -1665,6 +1812,7 @@
       currentDivisions = [];
       updateHeader();
       applyScopeFilter();
+      scheduleCoinTossSave();
     });
 
     document.getElementById("btnResetInput").addEventListener("click", () => {
@@ -1677,6 +1825,7 @@
       currentDivisions = [];
       updateHeader();
       renderFixtures();
+      scheduleCoinTossSave();
     });
 
     /* =========================================================
@@ -1766,14 +1915,27 @@
 
     // Initialise shared application storage independently of the fixture cache.
     // A storage failure must not prevent the existing Coin Toss module from loading.
-    openAppDatabase().catch(error => {
-      document.getElementById("persistenceStatus").textContent = "Unavailable";
-      console.warn("Application persistence could not be initialised:", error);
-    });
+    async function startApplication() {
+      updateHeader();
+      try {
+        await openAppDatabase();
+        await AppPersistence.cleanup();
+      } catch (error) {
+        document.getElementById("persistenceStatus").textContent = "Unavailable";
+        console.warn("Application persistence could not be initialised:", error);
+      }
 
-    // Load any saved JSON immediately; download only when due or forced.
-    updateHeader();
-    loadFixtureDatabase();
+      // Load fixture metadata first so saved competition/division selections can be restored.
+      await loadFixtureDatabase();
+      try {
+        const restored = await restoreCoinTossState();
+        if (restored) importStatusEl.textContent += " Previous Coin Toss session restored.";
+      } catch (error) {
+        console.warn("Unable to restore Coin Toss state:", error);
+      }
+    }
+
+    startApplication();
   </script>
 </body>
 </html>
