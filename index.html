@@ -1332,7 +1332,7 @@
     const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
     function flipSingle(index) {
-      if (isAnimating || !visibleFixtures[index]) return;
+      if (isAnimating || !visibleFixtures[index] || visibleFixtures[index].winner) return;
 
       const coin = document.getElementById(`coin-${index}`);
       const slot = document.getElementById(`slot-${index}`);
@@ -1352,22 +1352,24 @@
     async function runAnimated() {
       if (isAnimating || !visibleFixtures.length) return;
 
+      // Only toss fixtures that do not already have a recorded winner.
+      const pendingFixtures = visibleFixtures
+        .map((fixture, index) => ({ fixture, index }))
+        .filter(item => !item.fixture.winner);
+
+      if (!pendingFixtures.length) return;
+
       isAnimating = true;
-
-      visibleFixtures.forEach((fixture, index) => {
-        fixture.winner = null;
-        document.getElementById(`slot-${index}`).innerHTML = `<span class="winner-tbc">TBC</span>`;
-      });
-
       viewportEl.scrollTo({ top: 0, behavior: "smooth" });
       await sleep(250);
 
-      for (let index = 0; index < visibleFixtures.length; index++) {
+      for (let pendingIndex = 0; pendingIndex < pendingFixtures.length; pendingIndex++) {
+        const { fixture, index } = pendingFixtures[pendingIndex];
         const row = document.getElementById(`row-${index}`);
         const coin = document.getElementById(`coin-${index}`);
         const slot = document.getElementById(`slot-${index}`);
 
-        if (visibleFixtures.length > 6 && index >= 3) {
+        if (pendingFixtures.length > 6 && pendingIndex >= 3) {
           viewportEl.scrollTo({
             top: Math.max(0, row.offsetTop + row.offsetHeight / 2 - viewportEl.clientHeight / 2),
             behavior: "smooth"
@@ -1381,9 +1383,10 @@
 
         await sleep(850);
 
-        visibleFixtures[index].winner = pickWinner(visibleFixtures[index]);
-        slot.innerHTML = `<span class="winner-pill">${esc(winnerDisplayName(visibleFixtures[index].winner))}</span>`;
+        fixture.winner = pickWinner(fixture);
+        slot.innerHTML = `<span class="winner-pill">${esc(winnerDisplayName(fixture.winner))}</span>`;
         coin.classList.remove("flipping");
+        scheduleCoinTossSave();
 
         await sleep(500);
         row.classList.remove("is-tossing");
@@ -1400,6 +1403,7 @@
       if (isAnimating) return;
 
       visibleFixtures.forEach((fixture, index) => {
+        if (fixture.winner) return;
         fixture.winner = pickWinner(fixture);
         document.getElementById(`slot-${index}`).innerHTML =
           `<span class="winner-pill">${esc(winnerDisplayName(fixture.winner))}</span>`;
