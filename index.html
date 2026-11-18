@@ -69,6 +69,81 @@
     }
 
     /* =========================================================
+       APPLICATION NAVIGATION
+       ========================================================= */
+    .app-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 4px 2px 0;
+    }
+
+    .app-heading h1 {
+      font-size: 1.05rem;
+      font-weight: 800;
+      color: var(--text-main);
+    }
+
+    .app-heading span {
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      font-weight: 700;
+    }
+
+    .module-nav {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      padding: 5px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+    }
+
+    .module-nav button {
+      min-height: 44px;
+      background: transparent;
+      color: var(--text-muted);
+      border: 1px solid transparent;
+      font-size: 0.88rem;
+    }
+
+    .module-nav button.active {
+      background: var(--ntl-green);
+      color: #FFF;
+    }
+
+    .module-placeholder {
+      min-height: 260px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 28px 20px;
+      text-align: center;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+    }
+
+    .module-placeholder h2 {
+      font-size: 1.15rem;
+    }
+
+    .module-placeholder p {
+      max-width: 320px;
+      color: var(--text-muted);
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    /* =========================================================
        2. MAIN FIXTURE DISPLAY AND HEADER
        ========================================================= */
     .recording-frame {
@@ -712,7 +787,21 @@
 
 <body>
   <main class="app-container">
+    <header class="app-heading">
+      <h1>NTL Match Tools</h1>
+      <span>NOTTINGHAM TOUCH LEAGUES</span>
+    </header>
 
+    <nav class="module-nav" aria-label="Application sections">
+      <button type="button" class="active" id="navCoinToss" aria-controls="coinTossView" aria-selected="true">
+        Coin Toss
+      </button>
+      <button type="button" id="navTournamentTimer" aria-controls="tournamentTimerView" aria-selected="false">
+        Tournament Timer
+      </button>
+    </nav>
+
+    <section id="coinTossView" class="module-view" aria-label="Coin Toss">
     <!-- =====================================================
          MAIN DISPLAY: APP TITLE, DATE AND FIXTURE LIST
          ===================================================== -->
@@ -842,6 +931,12 @@
         <div id="diagnosticOutput" aria-live="polite">Diagnostics have not been run.</div>
       </div>
     </details>
+    </section>
+
+    <section id="tournamentTimerView" class="module-view module-placeholder" aria-label="Tournament Timer" hidden>
+      <h2>Tournament Timer</h2>
+      <p>This section is reserved for the Tournament Timer. The timer will be developed here in a later stage.</p>
+    </section>
   </main>
 
   <script>
@@ -1912,6 +2007,38 @@
     }
 
     document.getElementById("btnRunDiagnostics").addEventListener("click", runDiagnostics);
+
+    /* =========================================================
+       APPLICATION NAVIGATION
+       ========================================================= */
+
+    function showApplicationModule(moduleName) {
+      const showCoinToss = moduleName === "coinToss";
+      const coinTossView = document.getElementById("coinTossView");
+      const timerView = document.getElementById("tournamentTimerView");
+      const coinTossButton = document.getElementById("navCoinToss");
+      const timerButton = document.getElementById("navTournamentTimer");
+
+      coinTossView.hidden = !showCoinToss;
+      timerView.hidden = showCoinToss;
+
+      coinTossButton.classList.toggle("active", showCoinToss);
+      timerButton.classList.toggle("active", !showCoinToss);
+      coinTossButton.setAttribute("aria-selected", String(showCoinToss));
+      timerButton.setAttribute("aria-selected", String(!showCoinToss));
+
+      document.title = showCoinToss
+        ? "Nottingham Touch Leagues – Coin Toss"
+        : "Nottingham Touch Leagues – Tournament Timer";
+    }
+
+    document.getElementById("navCoinToss").addEventListener("click", () => {
+      showApplicationModule("coinToss");
+    });
+
+    document.getElementById("navTournamentTimer").addEventListener("click", () => {
+      showApplicationModule("tournamentTimer");
+    });
 
     /* =========================================================
        12. START THE APP
