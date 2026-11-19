@@ -1195,9 +1195,7 @@
           halfTimeSeconds: halves === 2 ? seconds(game.halfTimeSeconds) : 0,
           intervalAfterSeconds: seconds(game.intervalAfterSeconds),
           preGameWarningSeconds: seconds(game.preGameWarningSeconds),
-          resultRequired: Boolean(game.resultRequired),
-          extraTimeDelaySeconds: seconds(game.extraTimeDelaySeconds),
-          extraTimeSeconds: seconds(game.extraTimeSeconds || 120)
+          resultRequired: Boolean(game.resultRequired)
         };
       }
 
@@ -1210,8 +1208,12 @@
           phases.push({ type: "half-2", label: "Second half", durationSeconds: game.halfDurationSeconds });
         }
         if (game.resultRequired) {
-          if (game.extraTimeDelaySeconds > 0) phases.push({ type: "result-interval", label: "Result interval", durationSeconds: game.extraTimeDelaySeconds });
-          phases.push({ type: "extra-time", label: "Extra time", durationSeconds: game.extraTimeSeconds });
+          // Fixed match procedure: after normal playing time ends (whether
+          // one or two halves), allow one minute for the transition,
+          // followed by two minutes of extra time.
+          // These timings are deliberately not user-configurable.
+          phases.push({ type: "result-interval", label: "Result transition", durationSeconds: 60 });
+          phases.push({ type: "extra-time", label: "Extra time", durationSeconds: 120 });
         }
         if (game.intervalAfterSeconds > 0) phases.push({ type: "between-games", label: "Between-game interval", durationSeconds: game.intervalAfterSeconds });
         return phases;
