@@ -1139,6 +1139,229 @@
       persistence: AppPersistence
     });
 
+
+    /* =========================================================
+       TOURNAMENT TIMER ENGINE — STAGE 4
+       UI-independent, timestamp-based and isolated from Coin Toss.
+       ========================================================= */
+    const TournamentTimerEngine = (() => {
+      const STORAGE_MODULE = "tournamentTimer";
+      const listeners = new Set();
+      let state = {
+        schemaVersion: 1,
+        status: "idle",
+        scheduleMode: "sequential",
+        games: [],
+        currentGameIndex: 0,
+        currentPhaseIndex: 0,
+        phases: [],
+        startedAt: null,
+        pausedAt: null,
+        pausedTotalMs: 0,
+        phaseStartedAt: null,
+        phaseEndsAt: null,
+        lastEvent: null,
+        eventLog: [],
+        updatedAt: Date.now()
+      };
+      let transitionPromise = Promise.resolve();
+
+      const clone = value => JSON.parse(JSON.stringify(value));
+      const seconds = value => Math.max(0, Number(value) || 0);
+      const now = () => Date.now();
+      const emit = () => { const snapshot = getSnapshot(); listeners.forEach(fn => { try { fn(snapshot); } catch (error) { console.warn("Timer listener error:", error); } }); };
+      const log = (type, detail = {}) => {
+        const event = { type, at: now(), gameIndex: state.currentGameIndex, phaseIndex: state.currentPhaseIndex, ...detail };
+        state.eventLog.push(event);
+        state.lastEvent = event;
+        state.updatedAt = event.at;
+      };
+
+      function validateGame(game, index) {
+        if (!game || typeof game !== "object") throw new Error(`Game ${index + 1} is invalid.`);
+        const halves = Number(game.halves ?? 2);
+        if (![1, 2].includes(halves)) throw new Error(`Game ${index + 1}: halves must be 1 or 2.`);
+        const halfDurationSeconds = seconds(game.halfDurationSeconds);
+        if (!halfDurationSeconds) throw new Error(`Game ${index + 1}: half duration must be greater than zero.`);
+        if (halves === 2 && !seconds(game.halfTimeSeconds)) throw new Error(`Game ${index + 1}: half-time must be greater than zero for a two-half game.`);
+        return {
+          id: String(game.id || `game-${index + 1}`),
+          fixtureId: game.fixtureId == null ? null : String(game.fixtureId),
+          label: String(game.label || `Game ${index + 1}`),
+          court: game.court == null ? null : String(game.court),
+          mode: game.mode === "touchdown-turnaround" ? "touchdown-turnaround" : "traditional",
+          halves,
+          halfDurationSeconds,
+          halfTimeSeconds: halves === 2 ? seconds(game.halfTimeSeconds) : 0,
+          intervalAfterSeconds: seconds(game.intervalAfterSeconds),
+          preGameWarningSeconds: seconds(game.preGameWarningSeconds),
+          resultRequired: Boolean(game.resultRequired),
+          extraTimeDelaySeconds: seconds(game.extraTimeDelaySeconds),
+          extraTimeSeconds: seconds(game.extraTimeSeconds || 120)
+        };
+      }
+
+      function makePhases(game) {
+        const phases = [];
+        if (game.preGameWarningSeconds > 0) phases.push({ type: "pre-game-warning", label: "Pre-game warning", durationSeconds: game.preGameWarningSeconds });
+        phases.push({ type: "half-1", label: game.halves === 1 ? "Game" : "First half", durationSeconds: game.halfDurationSeconds });
+        if (game.halves === 2) {
+          phases.push({ type: "half-time", label: "Half-time", durationSeconds: game.halfTimeSeconds });
+          phases.push({ type: "half-2", label: "Second half", durationSeconds: game.halfDurationSeconds });
+        }
+        if (game.resultRequired) {
+          if (game.extraTimeDelaySeconds > 0) phases.push({ type: "result-interval", label: "Result interval", durationSeconds: game.extraTimeDelaySeconds });
+          phases.push({ type: "extra-time", label: "Extra time", durationSeconds: game.extraTimeSeconds });
+        }
+        if (game.intervalAfterSeconds > 0) phases.push({ type: "between-games", label: "Between-game interval", durationSeconds: game.intervalAfterSeconds });
+        return phases;
+      }
+
+      function rebuildPhases() {
+        state.phases = state.games[state.currentGameIndex] ? makePhases(state.games[state.currentGameIndex]) : [];
+      }
+
+      async function persist() {
+        state.updatedAt = now();
+        await AppPersistence.saveModuleState(STORAGE_MODULE, clone(state));
+      }
+
+      function elapsedAt(timestamp) {
+        if (!state.phaseStartedAt) return 0;
+        const end = state.pausedAt || timestamp;
+        return Math.max(0, end - state.phaseStartedAt);
+      }
+
+      function getSnapshot() {
+        const game = state.games[state.currentGameIndex] || null;
+        const phase = state.phases[state.currentPhaseIndex] || null;
+        const timestamp = now();
+        const durationMs = phase ? phase.durationSeconds * 1000 : 0;
+        const elapsedMs = state.status === "paused" ? elapsedAt(timestamp) : (state.status === "running" ? elapsedAt(timestamp) : 0);
+        return {
+          status: state.status,
+          scheduleMode: state.scheduleMode,
+          game: game ? clone(game) : null,
+          gameIndex: state.currentGameIndex,
+          gameCount: state.games.length,
+          phase: phase ? clone(phase) : null,
+          phaseIndex: state.currentPhaseIndex,
+          remainingMs: phase ? Math.max(0, durationMs - elapsedMs) : 0,
+          elapsedMs,
+          phaseDurationMs: durationMs,
+          phaseEndsAt: state.phaseEndsAt,
+          eventLog: clone(state.eventLog),
+          updatedAt: state.updatedAt
+        };
+      }
+
+      async function configure(games, options = {}) {
+        if (state.status === "running" || state.status === "paused") throw new Error("Cancel the active timer before changing its schedule.");
+        if (!Array.isArray(games) || games.length === 0) throw new Error("Add at least one game to the schedule.");
+        state = { ...state, status: "idle", scheduleMode: options.scheduleMode === "clock" ? "clock" : "sequential", games: games.map(validateGame), currentGameIndex: 0, currentPhaseIndex: 0, phases: [], startedAt: null, pausedAt: null, pausedTotalMs: 0, phaseStartedAt: null, phaseEndsAt: null, eventLog: [], lastEvent: null };
+        rebuildPhases();
+        log("schedule-configured", { games: state.games.length, scheduleMode: state.scheduleMode });
+        await persist(); emit();
+        return getSnapshot();
+      }
+
+      async function allocateFixtures(fixtures, courts) {
+        if (!Array.isArray(fixtures) || !Array.isArray(courts) || !courts.length) throw new Error("Provide fixtures and at least one court.");
+        const assignments = fixtures.map((fixture, index) => ({
+          id: String(fixture.id || fixture.fixtureId || `fixture-${index + 1}`),
+          fixtureId: String(fixture.id || fixture.fixtureId || `fixture-${index + 1}`),
+          label: fixture.label || [fixture.teamA, fixture.teamB].filter(Boolean).join(" vs ") || `Fixture ${index + 1}`,
+          court: String(courts[index % courts.length])
+        }));
+        log("fixtures-allocated", { fixtureCount: assignments.length, courts: courts.map(String) });
+        state.updatedAt = now();
+        return assignments;
+      }
+
+      async function start() {
+        if (!state.games.length) throw new Error("Configure the tournament schedule before starting.");
+        if (state.status !== "idle" && state.status !== "completed") throw new Error("Timer can only be started from an idle or completed state.");
+        state.currentGameIndex = 0; state.currentPhaseIndex = 0; rebuildPhases();
+        state.status = "running"; state.startedAt = now(); state.pausedAt = null; state.pausedTotalMs = 0;
+        const phase = state.phases[0]; state.phaseStartedAt = state.startedAt; state.phaseEndsAt = state.phaseStartedAt + phase.durationSeconds * 1000;
+        log("timer-started", { phase: phase.type }); await persist(); emit(); return getSnapshot();
+      }
+
+      async function pause() {
+        if (state.status !== "running") throw new Error("Only a running timer can be paused.");
+        await tick(); state.pausedAt = now(); state.status = "paused"; state.phaseEndsAt = state.phaseStartedAt + state.phases[state.currentPhaseIndex].durationSeconds * 1000;
+        log("timer-paused"); await persist(); emit(); return getSnapshot();
+      }
+
+      async function resume() {
+        if (state.status !== "paused") throw new Error("Only a paused timer can be resumed.");
+        const pauseDuration = now() - state.pausedAt; state.phaseStartedAt += pauseDuration; state.pausedTotalMs += pauseDuration; state.pausedAt = null; state.status = "running";
+        state.phaseEndsAt = state.phaseStartedAt + state.phases[state.currentPhaseIndex].durationSeconds * 1000;
+        log("timer-resumed"); await persist(); emit(); return getSnapshot();
+      }
+
+      async function advancePhase() {
+        if (state.status !== "running") return getSnapshot();
+        const current = state.phases[state.currentPhaseIndex];
+        log("phase-completed", { phase: current?.type });
+        if (state.currentPhaseIndex < state.phases.length - 1) {
+          state.currentPhaseIndex++;
+        } else if (state.currentGameIndex < state.games.length - 1) {
+          state.currentGameIndex++; state.currentPhaseIndex = 0; rebuildPhases();
+        } else {
+          state.status = "completed"; state.phaseStartedAt = null; state.phaseEndsAt = null;
+          log("tournament-completed");
+          await AppPersistence.saveCompletedSession({ type: "tournament-timer", startedAt: state.startedAt, completedAt: now(), games: state.games, eventLog: state.eventLog });
+          await persist(); emit(); return getSnapshot();
+        }
+        const next = state.phases[state.currentPhaseIndex];
+        state.phaseStartedAt = state.phaseEndsAt || now();
+        state.phaseEndsAt = state.phaseStartedAt + next.durationSeconds * 1000;
+        log("phase-started", { phase: next.type });
+        await persist(); emit();
+        return getSnapshot();
+      }
+
+      async function tick() {
+        transitionPromise = transitionPromise.then(async () => {
+          if (state.status !== "running") return getSnapshot();
+          // Catch up across multiple phases if the browser was suspended.
+          while (state.status === "running" && state.phaseEndsAt != null && now() >= state.phaseEndsAt) {
+            await advancePhase();
+          }
+          emit(); return getSnapshot();
+        });
+        return transitionPromise;
+      }
+
+      async function cancel() {
+        if (state.status === "idle") return getSnapshot();
+        log("timer-cancelled"); state.status = "idle"; state.startedAt = null; state.pausedAt = null; state.phaseStartedAt = null; state.phaseEndsAt = null; state.currentGameIndex = 0; state.currentPhaseIndex = 0; rebuildPhases();
+        await persist(); emit(); return getSnapshot();
+      }
+
+      async function restore() {
+        const record = await AppPersistence.loadModuleState(STORAGE_MODULE);
+        if (!record?.state || record.state.schemaVersion !== 1) return getSnapshot();
+        state = record.state;
+        if (state.status === "running" && state.phaseEndsAt != null) await tick();
+        emit(); return getSnapshot();
+      }
+
+      function subscribe(listener) { if (typeof listener !== "function") throw new Error("Listener must be a function."); listeners.add(listener); return () => listeners.delete(listener); }
+      function getEventLog() { return clone(state.eventLog); }
+
+      return Object.freeze({ configure, allocateFixtures, start, pause, resume, cancel, tick, restore, subscribe, getSnapshot, getEventLog });
+    })();
+
+    // The timer engine is exposed separately; no Coin Toss code depends on it.
+    window.NTLApp = Object.freeze({
+      version: APP_DB_VERSION,
+      persistence: AppPersistence,
+      tournamentTimer: TournamentTimerEngine
+    });
+
+
     const viewportEl = document.getElementById("fixturesViewport");
     const inputEl = document.getElementById("fixtureInput");
     const headerCompetitionEl = document.getElementById("headerCompetition");
@@ -2055,6 +2278,9 @@
         document.getElementById("persistenceStatus").textContent = "Unavailable";
         console.warn("Application persistence could not be initialised:", error);
       }
+
+      // Restore timer state independently; failures must not affect Coin Toss.
+      try { await TournamentTimerEngine.restore(); } catch (error) { console.warn("Unable to restore Tournament Timer state:", error); }
 
       // Load fixture metadata first so saved competition/division selections can be restored.
       await loadFixtureDatabase();
