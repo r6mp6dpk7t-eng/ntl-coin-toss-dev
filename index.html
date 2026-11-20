@@ -1151,6 +1151,7 @@
         schemaVersion: 1,
         status: "idle",
         scheduleMode: "sequential",
+        resultRequiredIntervalSeconds: 600,
         games: [],
         currentGameIndex: 0,
         currentPhaseIndex: 0,
@@ -1215,7 +1216,18 @@
           phases.push({ type: "result-interval", label: "Result transition", durationSeconds: 60 });
           phases.push({ type: "extra-time", label: "Extra time", durationSeconds: 120 });
         }
-        if (game.intervalAfterSeconds > 0) phases.push({ type: "between-games", label: "Between-game interval", durationSeconds: game.intervalAfterSeconds });
+        // Result-required games use their own recovery interval after every
+        // completed RR game. Ordinary games retain their individual interval.
+        const intervalSeconds = game.resultRequired
+          ? state.resultRequiredIntervalSeconds
+          : game.intervalAfterSeconds;
+        if (intervalSeconds > 0) {
+          phases.push({
+            type: game.resultRequired ? "result-required-interval" : "between-games",
+            label: game.resultRequired ? "Result-required recovery interval" : "Between-game interval",
+            durationSeconds: intervalSeconds
+          });
+        }
         return phases;
       }
 
@@ -1243,6 +1255,7 @@
         return {
           status: state.status,
           scheduleMode: state.scheduleMode,
+          resultRequiredIntervalSeconds: state.resultRequiredIntervalSeconds,
           game: game ? clone(game) : null,
           gameIndex: state.currentGameIndex,
           gameCount: state.games.length,
@@ -1260,7 +1273,23 @@
       async function configure(games, options = {}) {
         if (state.status === "running" || state.status === "paused") throw new Error("Cancel the active timer before changing its schedule.");
         if (!Array.isArray(games) || games.length === 0) throw new Error("Add at least one game to the schedule.");
-        state = { ...state, status: "idle", scheduleMode: options.scheduleMode === "clock" ? "clock" : "sequential", games: games.map(validateGame), currentGameIndex: 0, currentPhaseIndex: 0, phases: [], startedAt: null, pausedAt: null, pausedTotalMs: 0, phaseStartedAt: null, phaseEndsAt: null, eventLog: [], lastEvent: null };
+        state = {
+          ...state,
+          status: "idle",
+          scheduleMode: options.scheduleMode === "clock" ? "clock" : "sequential",
+          resultRequiredIntervalSeconds: seconds(options.resultRequiredIntervalSeconds ?? 600),
+          games: games.map(validateGame),
+          currentGameIndex: 0,
+          currentPhaseIndex: 0,
+          phases: [],
+          startedAt: null,
+          pausedAt: null,
+          pausedTotalMs: 0,
+          phaseStartedAt: null,
+          phaseEndsAt: null,
+          eventLog: [],
+          lastEvent: null
+        };
         rebuildPhases();
         log("schedule-configured", { games: state.games.length, scheduleMode: state.scheduleMode });
         await persist(); emit();
