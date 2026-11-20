@@ -1196,6 +1196,9 @@
           halfTimeSeconds: halves === 2 ? seconds(game.halfTimeSeconds) : 0,
           intervalAfterSeconds: seconds(game.intervalAfterSeconds),
           preGameWarningSeconds: seconds(game.preGameWarningSeconds),
+          scheduledStartAt: game.scheduledStartAt == null || game.scheduledStartAt === ""
+            ? null
+            : (Number.isFinite(Number(game.scheduledStartAt)) ? Number(game.scheduledStartAt) : Date.parse(game.scheduledStartAt)),
           resultRequired: Boolean(game.resultRequired)
         };
       }
@@ -1256,6 +1259,7 @@
           status: state.status,
           scheduleMode: state.scheduleMode,
           resultRequiredIntervalSeconds: state.resultRequiredIntervalSeconds,
+          nextScheduledStartAt: game?.scheduledStartAt ?? null,
           game: game ? clone(game) : null,
           gameIndex: state.currentGameIndex,
           gameCount: state.games.length,
@@ -1273,12 +1277,24 @@
       async function configure(games, options = {}) {
         if (state.status === "running" || state.status === "paused") throw new Error("Cancel the active timer before changing its schedule.");
         if (!Array.isArray(games) || games.length === 0) throw new Error("Add at least one game to the schedule.");
+        const validatedGames = games.map(validateGame);
+        const scheduleMode = options.scheduleMode === "clock" ? "clock" : "sequential";
+        if (scheduleMode === "clock") {
+          validatedGames.forEach((game, index) => {
+            if (!Number.isFinite(game.scheduledStartAt)) {
+              throw new Error(`Game ${index + 1}: a valid scheduledStartAt is required for clock scheduling.`);
+            }
+            if (index > 0 && game.scheduledStartAt <= validatedGames[index - 1].scheduledStartAt) {
+              throw new Error("Clock-scheduled games must have strictly increasing start times.");
+            }
+          });
+        }
         state = {
           ...state,
           status: "idle",
-          scheduleMode: options.scheduleMode === "clock" ? "clock" : "sequential",
+          scheduleMode,
           resultRequiredIntervalSeconds: seconds(options.resultRequiredIntervalSeconds ?? 600),
-          games: games.map(validateGame),
+          games: validatedGames,
           currentGameIndex: 0,
           currentPhaseIndex: 0,
           phases: [],
@@ -1314,7 +1330,17 @@
         if (state.status !== "idle" && state.status !== "completed") throw new Error("Timer can only be started from an idle or completed state.");
         state.currentGameIndex = 0; state.currentPhaseIndex = 0; rebuildPhases();
         state.status = "running"; state.startedAt = now(); state.pausedAt = null; state.pausedTotalMs = 0;
-        const phase = state.phases[0]; state.phaseStartedAt = state.startedAt; state.phaseEndsAt = state.phaseStartedAt + phase.durationSeconds * 1000;
+        const firstGame = state.games[0];
+        if (state.scheduleMode === "clock" && firstGame.scheduledStartAt > state.startedAt) {
+          state.phases.unshift({
+            type: "scheduled-wait",
+            label: "Waiting for scheduled start",
+            durationSeconds: Math.ceil((firstGame.scheduledStartAt - state.startedAt) / 1000)
+          });
+        }
+        const phase = state.phases[0];
+        state.phaseStartedAt = state.startedAt;
+        state.phaseEndsAt = phase.type === "scheduled-wait" ? firstGame.scheduledStartAt : state.phaseStartedAt + phase.durationSeconds * 1000;
         log("timer-started", { phase: phase.type }); await persist(); emit(); return getSnapshot();
       }
 
@@ -1338,7 +1364,18 @@
         if (state.currentPhaseIndex < state.phases.length - 1) {
           state.currentPhaseIndex++;
         } else if (state.currentGameIndex < state.games.length - 1) {
-          state.currentGameIndex++; state.currentPhaseIndex = 0; rebuildPhases();
+          const previousGame = state.games[state.currentGameIndex];
+          state.currentGameIndex++;
+          state.currentPhaseIndex = 0;
+          rebuildPhases();
+          const nextGame = state.games[state.currentGameIndex];
+          if (state.scheduleMode === "clock" && nextGame.scheduledStartAt > (state.phaseEndsAt || now())) {
+            state.phases.unshift({
+              type: "scheduled-wait",
+              label: "Waiting for scheduled start",
+              durationSeconds: Math.ceil((nextGame.scheduledStartAt - (state.phaseEndsAt || now())) / 1000)
+            });
+          }
         } else {
           state.status = "completed"; state.phaseStartedAt = null; state.phaseEndsAt = null;
           log("tournament-completed");
@@ -1347,8 +1384,12 @@
         }
         const next = state.phases[state.currentPhaseIndex];
         state.phaseStartedAt = state.phaseEndsAt || now();
-        state.phaseEndsAt = state.phaseStartedAt + next.durationSeconds * 1000;
-        log("phase-started", { phase: next.type });
+        if (next.type === "scheduled-wait") {
+          state.phaseEndsAt = state.games[state.currentGameIndex].scheduledStartAt;
+        } else {
+          state.phaseEndsAt = state.phaseStartedAt + next.durationSeconds * 1000;
+        }
+        log("phase-started", { phase: next.type, scheduledAt: next.type === "scheduled-wait" ? state.phaseEndsAt : null });
         await persist(); emit();
         return getSnapshot();
       }
