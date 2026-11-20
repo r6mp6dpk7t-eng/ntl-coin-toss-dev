@@ -1428,9 +1428,9 @@
 
 
     /* =========================================================
-       TOURNAMENT AUDIO CONTROLLER — STAGE 4.2
-       Audio follows the timer's absolute phase timestamps.
-       It never changes or delays timer state.
+       TOURNAMENT AUDIO CONTROLLER — STAGE 4.2 CONSOLIDATED
+       Audio follows absolute timer timestamps. It never drives
+       or changes the timer engine.
        ========================================================= */
     const TournamentAudioController = (() => {
       const AUDIO_PATHS = {
@@ -1440,30 +1440,46 @@
         standby: "audio/standby.mp3",
         hooter: "audio/hooter.mp3"
       };
-      const firedKey = "ntlTournamentAudioFiredV1";
+
+      const FIRED_KEY = "ntlTournamentAudioFiredV2";
+      const WARNING_60_CLIP_MS = 3474;
+      const SILENCE_AFTER_WARNING_MS = 3000;
+      const LATE_EVENT_LIMIT_MS = 2500;
+
       let enabled = true;
       let unlocked = false;
       let active = false;
-      let lastPhaseToken = null;
       let fired = new Set();
+      let pendingEvents = new Map();
       let audioElements = {};
       let pollHandle = null;
       let unsubscribe = null;
       let lastSnapshot = null;
+      let unlockListenerInstalled = false;
 
-      const readFired = () => {
-        try { fired = new Set(JSON.parse(localStorage.getItem(firedKey) || "[]")); }
-        catch (_) { fired = new Set(); }
-      };
-      const persistFired = () => {
-        try { localStorage.setItem(firedKey, JSON.stringify([...fired].slice(-500))); }
-        catch (error) { console.warn("Audio event history could not be saved:", error); }
-      };
+      function readFired() {
+        try {
+          fired = new Set(JSON.parse(localStorage.getItem(FIRED_KEY) || "[]"));
+        } catch (_) {
+          fired = new Set();
+        }
+      }
+
+      function persistFired() {
+        try {
+          localStorage.setItem(FIRED_KEY, JSON.stringify([...fired].slice(-500)));
+        } catch (error) {
+          console.warn("Tournament audio history could not be saved:", error);
+        }
+      }
 
       function configure(paths = {}) {
         Object.keys(AUDIO_PATHS).forEach(key => {
-          if (typeof paths[key] === "string" && paths[key].trim()) AUDIO_PATHS[key] = paths[key].trim();
+          if (typeof paths[key] === "string" && paths[key].trim()) {
+            AUDIO_PATHS[key] = paths[key].trim();
+          }
         });
+
         Object.keys(AUDIO_PATHS).forEach(key => {
           if (audioElements[key]) {
             audioElements[key].pause();
@@ -1471,144 +1487,301 @@
             audioElements[key].load();
           }
         });
-        return getStatus();
-      }
 
-      function unlock() {
-        // Must be called from a direct user gesture on iOS Safari.
-        const element = new Audio();
-        element.muted = true;
-        const attempt = element.play();
-        if (attempt && typeof attempt.then === "function") {
-          return attempt.then(() => {
-            element.pause();
-            element.currentTime = 0;
-            unlocked = true;
-            return true;
-          }).catch(() => false);
-        }
-        unlocked = true;
-        return Promise.resolve(true);
+        return getStatus();
       }
 
       function ensureAudio() {
         if (typeof Audio === "undefined") return;
+
         Object.keys(AUDIO_PATHS).forEach(key => {
           if (!audioElements[key]) {
-            audioElements[key] = new Audio(AUDIO_PATHS[key]);
-            audioElements[key].preload = "auto";
+            const audio = new Audio(AUDIO_PATHS[key]);
+            audio.preload = "auto";
+            audioElements[key] = audio;
           }
         });
       }
 
-      function phaseStartTime(snapshot) {
-        if (snapshot?.phase?.type === "scheduled-wait") return snapshot.phaseEndsAt;
-        return snapshot?.phaseEndsAt != null && snapshot.phaseDurationMs
-          ? snapshot.phaseEndsAt - snapshot.phaseDurationMs
-          : null;
+      function unlock() {
+        // Call from a direct user interaction. iOS Safari requires this
+        // gesture before it will allow later scheduled audio playback.
+        ensureAudio();
+        const element = audioElements.hooter || new Audio();
+        const wasMuted = element.muted;
+        const previousVolume = element.volume;
+
+        element.muted = true;
+        element.volume = 0;
+
+        let attempt;
+        try {
+          attempt = element.play();
+        } catch (error) {
+          element.muted = wasMuted;
+          element.volume = previousVolume;
+          return Promise.resolve(false);
+        }
+
+        if (attempt && typeof attempt.then === "function") {
+          return attempt.then(() => {
+            element.pause();
+            try { element.currentTime = 0; } catch (_) {}
+            element.muted = wasMuted;
+            element.volume = previousVolume;
+            unlocked = true;
+            return true;
+          }).catch(() => {
+            element.muted = wasMuted;
+            element.volume = previousVolume;
+            return false;
+          });
+        }
+
+        element.pause();
+        element.muted = wasMuted;
+        element.volume = previousVolume;
+        unlocked = true;
+        return Promise.resolve(true);
+      }
+
+      function installUnlockGesture() {
+        if (unlockListenerInstalled || typeof document === "undefined") return;
+        unlockListenerInstalled = true;
+
+        const tryUnlock = () => {
+          unlock().then(success => {
+            if (success) {
+              document.removeEventListener("pointerdown", tryUnlock, true);
+              document.removeEventListener("touchstart", tryUnlock, true);
+              document.removeEventListener("click", tryUnlock, true);
+            }
+          });
+        };
+
+        // Any first tap/click in the app can unlock audio. No extra setup
+        // screen is required; the listener removes itself after success.
+        document.addEventListener("pointerdown", tryUnlock, true);
+        document.addEventListener("touchstart", tryUnlock, true);
+        document.addEventListener("click", tryUnlock, true);
+      }
+
+      function addEvents(events) {
+        events.forEach(event => {
+          if (!fired.has(event.id)) pendingEvents.set(event.id, event);
+        });
       }
 
       function scheduleFor(snapshot) {
         const phase = snapshot?.phase?.type;
-        let targetPhase = null;
-        let startAt = null;
+        const game = snapshot?.game;
+        const gameId = game?.id || `game-${snapshot?.gameIndex ?? 0}`;
+        const events = [];
+
+        if (!Number.isFinite(snapshot?.phaseEndsAt)) return events;
+
+        // Warning sequences are scheduled against the actual start of play.
+        // The standalone 60-second sentence is 3.474s long. It starts at
+        // T-66.474? No: it starts at T-63.474 so it finishes at T-60,
+        // leaving exactly three seconds before the field-of-play call at T-57.
+        let playStartAt = null;
+        let playPhase = null;
 
         if (phase === "pre-game-warning") {
-          targetPhase = "half-1";
-          startAt = snapshot.phaseEndsAt;
-        } else if (phase === "half-time" && snapshot.game?.halves === 2) {
-          targetPhase = "half-2";
-          startAt = snapshot.phaseEndsAt;
-        } else {
-          return [];
+          playStartAt = snapshot.phaseEndsAt;
+          playPhase = "half-1";
+        } else if (phase === "half-time" && game?.halves === 2) {
+          playStartAt = snapshot.phaseEndsAt;
+          playPhase = "half-2";
         }
 
-        if (!Number.isFinite(startAt)) return [];
-        const gameId = snapshot.game?.id || `game-${snapshot.gameIndex}`;
-        const phaseToken = `${gameId}:${targetPhase}:${startAt}`;
-        return [
-          { id: `${phaseToken}:warning60`, at: startAt - 65000, clip: "warning60" },
-          { id: `${phaseToken}:fieldCall`, at: startAt - 57000, clip: "fieldCall" },
-          { id: `${phaseToken}:warning30`, at: startAt - 30000, clip: "warning30" },
-          { id: `${phaseToken}:standby`, at: startAt - 10000, clip: "standby" },
-          { id: `${phaseToken}:hooter`, at: startAt, clip: "hooter" }
-        ];
+        if (playStartAt != null) {
+          const token = `${gameId}:${playPhase}:${playStartAt}`;
+          events.push(
+            {
+              id: `${token}:warning60`,
+              at: playStartAt - WARNING_60_CLIP_MS - SILENCE_AFTER_WARNING_MS,
+              clip: "warning60"
+            },
+            {
+              id: `${token}:fieldCall`,
+              at: playStartAt - 57000,
+              clip: "fieldCall"
+            },
+            {
+              id: `${token}:warning30`,
+              at: playStartAt - 30000,
+              clip: "warning30"
+            },
+            {
+              id: `${token}:standby`,
+              at: playStartAt - 10000,
+              clip: "standby"
+            },
+            {
+              id: `${token}:playHooter`,
+              at: playStartAt,
+              clip: "hooter"
+            }
+          );
+        }
+
+        // Main hooter at the end of every playing half, including a
+        // one-half game. This is queued while the half is active so it
+        // survives the engine moving into half-time/result interval.
+        if (phase === "half-1" || phase === "half-2" || phase === "extra-time") {
+          const token = `${gameId}:${phase}:${snapshot.phaseEndsAt}`;
+          events.push({
+            id: `${token}:endHooter`,
+            at: snapshot.phaseEndsAt,
+            clip: "hooter"
+          });
+        }
+
+        return events;
       }
 
       async function playEvent(event) {
-        if (!enabled || !unlocked || fired.has(event.id)) return;
-        fired.add(event.id);
-        persistFired();
+        if (!enabled || !unlocked || fired.has(event.id)) return false;
+
+        ensureAudio();
+        const audio = audioElements[event.clip];
+        if (!audio) return false;
+
         try {
-          ensureAudio();
-          const audio = audioElements[event.clip];
-          if (!audio) return;
           audio.pause();
           audio.currentTime = 0;
           await audio.play();
+          fired.add(event.id);
+          persistFired();
+          return true;
         } catch (error) {
+          // Record the failed attempt to prevent repeated overlapping
+          // attempts. The console warning makes device/browser failures
+          // visible during testing.
+          fired.add(event.id);
+          persistFired();
           console.warn(`Tournament audio playback failed (${event.clip}):`, error);
+          return false;
         }
       }
 
       function processDue(snapshot) {
         if (!active || !enabled || snapshot?.status !== "running") return;
-        const events = scheduleFor(snapshot);
+
+        addEvents(scheduleFor(snapshot));
+
         const currentTime = Date.now();
-        events.forEach(event => {
-          if (currentTime >= event.at && !fired.has(event.id)) {
-            // If the page was suspended past an event, mark it missed rather
-            // than playing stale warnings out of sequence on resume.
-            if (currentTime - event.at <= 2500) playEvent(event);
-            else {
+        const due = [...pendingEvents.values()]
+          .filter(event => currentTime >= event.at)
+          .sort((a, b) => a.at - b.at);
+
+        due.forEach(event => {
+          pendingEvents.delete(event.id);
+
+          if (fired.has(event.id)) return;
+
+          if (currentTime - event.at <= LATE_EVENT_LIMIT_MS) {
+            if (!unlocked) {
               fired.add(event.id);
               persistFired();
-              console.warn("Tournament audio event missed while page was suspended:", event.clip);
+              console.warn("Tournament audio event could not play because audio has not been unlocked:", event.clip);
+              return;
             }
+            playEvent(event);
+          } else {
+            fired.add(event.id);
+            persistFired();
+            console.warn("Tournament audio event missed while page was suspended:", event.clip);
           }
         });
       }
 
       function onSnapshot(snapshot) {
         lastSnapshot = snapshot;
-        if (snapshot?.status === "running") processDue(snapshot);
-        if (snapshot?.status === "idle" || snapshot?.status === "completed") {
-          lastPhaseToken = null;
+
+        if (snapshot?.status === "running") {
+          processDue(snapshot);
+        } else if (snapshot?.status === "idle" || snapshot?.status === "completed") {
+          pendingEvents.clear();
         }
       }
 
       function start() {
         readFired();
         ensureAudio();
+        installUnlockGesture();
         active = true;
-        if (!unsubscribe) unsubscribe = window.NTLApp?.tournamentTimer?.subscribe(onSnapshot) || null;
-        if (pollHandle == null) pollHandle = setInterval(() => {
-          if (lastSnapshot) processDue(lastSnapshot);
-        }, 200);
-        lastSnapshot = window.NTLApp?.tournamentTimer?.getSnapshot?.() || lastSnapshot;
+
+        const timer = window.NTLApp?.tournamentTimer;
+        if (!unsubscribe && timer?.subscribe) {
+          unsubscribe = timer.subscribe(onSnapshot);
+        }
+
+        if (pollHandle == null) {
+          pollHandle = setInterval(() => {
+            if (lastSnapshot) processDue(lastSnapshot);
+          }, 200);
+        }
+
+        lastSnapshot = timer?.getSnapshot?.() || lastSnapshot;
         if (lastSnapshot) onSnapshot(lastSnapshot);
+
         return getStatus();
       }
 
       function stop() {
         active = false;
+
         if (pollHandle != null) clearInterval(pollHandle);
         pollHandle = null;
+
         if (unsubscribe) unsubscribe();
         unsubscribe = null;
-        Object.values(audioElements).forEach(audio => { try { audio.pause(); } catch (_) {} });
+
+        Object.values(audioElements).forEach(audio => {
+          try { audio.pause(); } catch (_) {}
+        });
+
         return getStatus();
       }
 
-      function setEnabled(value) { enabled = Boolean(value); return getStatus(); }
-      function resetHistory() { fired.clear(); persistFired(); return getStatus(); }
+      function setEnabled(value) {
+        enabled = Boolean(value);
+        if (!enabled) pendingEvents.clear();
+        return getStatus();
+      }
+
+      function resetHistory() {
+        fired.clear();
+        pendingEvents.clear();
+        persistFired();
+        return getStatus();
+      }
+
       function getStatus() {
-        return { enabled, unlocked, active, audioFiles: { ...AUDIO_PATHS }, firedCount: fired.size };
+        return {
+          enabled,
+          unlocked,
+          active,
+          audioFiles: { ...AUDIO_PATHS },
+          firedCount: fired.size,
+          pendingCount: pendingEvents.size
+        };
       }
 
       readFired();
       ensureAudio();
-      return Object.freeze({ configure, unlock, start, stop, setEnabled, resetHistory, getStatus });
+
+      return Object.freeze({
+        configure,
+        unlock,
+        start,
+        stop,
+        setEnabled,
+        resetHistory,
+        getStatus
+      });
     })();
 
     // The timer engine is exposed separately; no Coin Toss code depends on it.
