@@ -1195,7 +1195,7 @@
           halfDurationSeconds,
           halfTimeSeconds: halves === 2 ? seconds(game.halfTimeSeconds) : 0,
           intervalAfterSeconds: seconds(game.intervalAfterSeconds),
-          preGameWarningSeconds: seconds(game.preGameWarningSeconds),
+          preGameWarningSeconds: seconds(game.preGameWarningSeconds ?? 65) || 65,
           scheduledStartAt: game.scheduledStartAt == null || game.scheduledStartAt === ""
             ? null
             : (Number.isFinite(Number(game.scheduledStartAt)) ? Number(game.scheduledStartAt) : Date.parse(game.scheduledStartAt)),
@@ -1426,11 +1426,197 @@
       return Object.freeze({ configure, allocateFixtures, start, pause, resume, cancel, tick, restore, subscribe, getSnapshot, getEventLog });
     })();
 
+
+    /* =========================================================
+       TOURNAMENT AUDIO CONTROLLER — STAGE 4.2
+       Audio follows the timer's absolute phase timestamps.
+       It never changes or delays timer state.
+       ========================================================= */
+    const TournamentAudioController = (() => {
+      const AUDIO_PATHS = {
+        warning60: "audio/warning-60.mp3",
+        fieldCall: "audio/field-of-play.mp3",
+        warning30: "audio/warning-30.mp3",
+        standby: "audio/standby.mp3",
+        hooter: "audio/hooter.mp3"
+      };
+      const firedKey = "ntlTournamentAudioFiredV1";
+      let enabled = true;
+      let unlocked = false;
+      let active = false;
+      let lastPhaseToken = null;
+      let fired = new Set();
+      let audioElements = {};
+      let pollHandle = null;
+      let unsubscribe = null;
+      let lastSnapshot = null;
+
+      const readFired = () => {
+        try { fired = new Set(JSON.parse(localStorage.getItem(firedKey) || "[]")); }
+        catch (_) { fired = new Set(); }
+      };
+      const persistFired = () => {
+        try { localStorage.setItem(firedKey, JSON.stringify([...fired].slice(-500))); }
+        catch (error) { console.warn("Audio event history could not be saved:", error); }
+      };
+
+      function configure(paths = {}) {
+        Object.keys(AUDIO_PATHS).forEach(key => {
+          if (typeof paths[key] === "string" && paths[key].trim()) AUDIO_PATHS[key] = paths[key].trim();
+        });
+        Object.keys(AUDIO_PATHS).forEach(key => {
+          if (audioElements[key]) {
+            audioElements[key].pause();
+            audioElements[key].src = AUDIO_PATHS[key];
+            audioElements[key].load();
+          }
+        });
+        return getStatus();
+      }
+
+      function unlock() {
+        // Must be called from a direct user gesture on iOS Safari.
+        const element = new Audio();
+        element.muted = true;
+        const attempt = element.play();
+        if (attempt && typeof attempt.then === "function") {
+          return attempt.then(() => {
+            element.pause();
+            element.currentTime = 0;
+            unlocked = true;
+            return true;
+          }).catch(() => false);
+        }
+        unlocked = true;
+        return Promise.resolve(true);
+      }
+
+      function ensureAudio() {
+        if (typeof Audio === "undefined") return;
+        Object.keys(AUDIO_PATHS).forEach(key => {
+          if (!audioElements[key]) {
+            audioElements[key] = new Audio(AUDIO_PATHS[key]);
+            audioElements[key].preload = "auto";
+          }
+        });
+      }
+
+      function phaseStartTime(snapshot) {
+        if (snapshot?.phase?.type === "scheduled-wait") return snapshot.phaseEndsAt;
+        return snapshot?.phaseEndsAt != null && snapshot.phaseDurationMs
+          ? snapshot.phaseEndsAt - snapshot.phaseDurationMs
+          : null;
+      }
+
+      function scheduleFor(snapshot) {
+        const phase = snapshot?.phase?.type;
+        let targetPhase = null;
+        let startAt = null;
+
+        if (phase === "pre-game-warning") {
+          targetPhase = "half-1";
+          startAt = snapshot.phaseEndsAt;
+        } else if (phase === "half-time" && snapshot.game?.halves === 2) {
+          targetPhase = "half-2";
+          startAt = snapshot.phaseEndsAt;
+        } else {
+          return [];
+        }
+
+        if (!Number.isFinite(startAt)) return [];
+        const gameId = snapshot.game?.id || `game-${snapshot.gameIndex}`;
+        const phaseToken = `${gameId}:${targetPhase}:${startAt}`;
+        return [
+          { id: `${phaseToken}:warning60`, at: startAt - 65000, clip: "warning60" },
+          { id: `${phaseToken}:fieldCall`, at: startAt - 57000, clip: "fieldCall" },
+          { id: `${phaseToken}:warning30`, at: startAt - 30000, clip: "warning30" },
+          { id: `${phaseToken}:standby`, at: startAt - 10000, clip: "standby" },
+          { id: `${phaseToken}:hooter`, at: startAt, clip: "hooter" }
+        ];
+      }
+
+      async function playEvent(event) {
+        if (!enabled || !unlocked || fired.has(event.id)) return;
+        fired.add(event.id);
+        persistFired();
+        try {
+          ensureAudio();
+          const audio = audioElements[event.clip];
+          if (!audio) return;
+          audio.pause();
+          audio.currentTime = 0;
+          await audio.play();
+        } catch (error) {
+          console.warn(`Tournament audio playback failed (${event.clip}):`, error);
+        }
+      }
+
+      function processDue(snapshot) {
+        if (!active || !enabled || snapshot?.status !== "running") return;
+        const events = scheduleFor(snapshot);
+        const currentTime = Date.now();
+        events.forEach(event => {
+          if (currentTime >= event.at && !fired.has(event.id)) {
+            // If the page was suspended past an event, mark it missed rather
+            // than playing stale warnings out of sequence on resume.
+            if (currentTime - event.at <= 2500) playEvent(event);
+            else {
+              fired.add(event.id);
+              persistFired();
+              console.warn("Tournament audio event missed while page was suspended:", event.clip);
+            }
+          }
+        });
+      }
+
+      function onSnapshot(snapshot) {
+        lastSnapshot = snapshot;
+        if (snapshot?.status === "running") processDue(snapshot);
+        if (snapshot?.status === "idle" || snapshot?.status === "completed") {
+          lastPhaseToken = null;
+        }
+      }
+
+      function start() {
+        readFired();
+        ensureAudio();
+        active = true;
+        if (!unsubscribe) unsubscribe = window.NTLApp?.tournamentTimer?.subscribe(onSnapshot) || null;
+        if (pollHandle == null) pollHandle = setInterval(() => {
+          if (lastSnapshot) processDue(lastSnapshot);
+        }, 200);
+        lastSnapshot = window.NTLApp?.tournamentTimer?.getSnapshot?.() || lastSnapshot;
+        if (lastSnapshot) onSnapshot(lastSnapshot);
+        return getStatus();
+      }
+
+      function stop() {
+        active = false;
+        if (pollHandle != null) clearInterval(pollHandle);
+        pollHandle = null;
+        if (unsubscribe) unsubscribe();
+        unsubscribe = null;
+        Object.values(audioElements).forEach(audio => { try { audio.pause(); } catch (_) {} });
+        return getStatus();
+      }
+
+      function setEnabled(value) { enabled = Boolean(value); return getStatus(); }
+      function resetHistory() { fired.clear(); persistFired(); return getStatus(); }
+      function getStatus() {
+        return { enabled, unlocked, active, audioFiles: { ...AUDIO_PATHS }, firedCount: fired.size };
+      }
+
+      readFired();
+      ensureAudio();
+      return Object.freeze({ configure, unlock, start, stop, setEnabled, resetHistory, getStatus });
+    })();
+
     // The timer engine is exposed separately; no Coin Toss code depends on it.
     window.NTLApp = Object.freeze({
       version: APP_DB_VERSION,
       persistence: AppPersistence,
-      tournamentTimer: TournamentTimerEngine
+      tournamentTimer: TournamentTimerEngine,
+      tournamentAudio: TournamentAudioController
     });
 
 
@@ -2353,6 +2539,7 @@
 
       // Restore timer state independently; failures must not affect Coin Toss.
       try { await TournamentTimerEngine.restore(); } catch (error) { console.warn("Unable to restore Tournament Timer state:", error); }
+      try { TournamentAudioController.start(); } catch (error) { console.warn("Tournament audio controller could not start:", error); }
 
       // Load fixture metadata first so saved competition/division selections can be restored.
       await loadFixtureDatabase();
