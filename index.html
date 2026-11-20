@@ -1443,7 +1443,7 @@
 
       const FIRED_KEY = "ntlTournamentAudioFiredV2";
       const WARNING_60_CLIP_MS = 3474;
-      const SILENCE_AFTER_WARNING_MS = 3000;
+      const WARNING_60_LEAD_MS = 60000;
       const LATE_EVENT_LIMIT_MS = 2500;
 
       let enabled = true;
@@ -1581,9 +1581,9 @@
         if (!Number.isFinite(snapshot?.phaseEndsAt)) return events;
 
         // Warning sequences are scheduled against the actual start of play.
-        // The standalone 60-second sentence is 3.474s long. It starts at
-        // T-66.474? No: it starts at T-63.474 so it finishes at T-60,
-        // leaving exactly three seconds before the field-of-play call at T-57.
+        // The standalone 60-second sentence starts 63.474s before play:
+        // it finishes at T-60, leaving exactly three seconds before the
+        // field-of-play call at T-57.
         let playStartAt = null;
         let playPhase = null;
 
@@ -1600,7 +1600,7 @@
           events.push(
             {
               id: `${token}:warning60`,
-              at: playStartAt - WARNING_60_CLIP_MS - SILENCE_AFTER_WARNING_MS,
+              at: playStartAt - WARNING_60_LEAD_MS - WARNING_60_CLIP_MS,
               clip: "warning60"
             },
             {
@@ -1719,8 +1719,21 @@
         }
 
         if (pollHandle == null) {
-          pollHandle = setInterval(() => {
-            if (lastSnapshot) processDue(lastSnapshot);
+          pollHandle = setInterval(async () => {
+            const currentTimer = window.NTLApp?.tournamentTimer;
+            if (currentTimer?.tick) {
+              try {
+                // The timer engine remains the source of truth. This
+                // heartbeat only asks it to catch up against Date.now().
+                await currentTimer.tick();
+                const freshSnapshot = currentTimer.getSnapshot?.();
+                if (freshSnapshot) onSnapshot(freshSnapshot);
+              } catch (error) {
+                console.warn("Tournament timer heartbeat failed:", error);
+              }
+            } else if (lastSnapshot) {
+              processDue(lastSnapshot);
+            }
           }, 200);
         }
 
