@@ -933,9 +933,28 @@
     </details>
     </section>
 
-    <section id="tournamentTimerView" class="module-view module-placeholder" aria-label="Tournament Timer" hidden>
+    <section id="tournamentTimerView" class="module-view" aria-label="Tournament Timer" hidden>
       <h2>Tournament Timer</h2>
-      <p>This section is reserved for the Tournament Timer. The timer will be developed here in a later stage.</p>
+      <p>The tournament timer engine is ready. Sound Check lets you verify the speaker and validate the audio sequence without changing a live tournament.</p>
+      <div class="panel" id="soundCheckPanel" style="margin-top:16px">
+        <h3>Sound Check</h3>
+        <p id="soundCheckStatus" aria-live="polite">Ready. Tap a test to begin.</p>
+        <div class="form-row" style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0">
+          <label for="soundCheckMode">Audio mode</label>
+          <select id="soundCheckMode" class="form-control">
+            <option value="announced">Announced Fixtures</option>
+            <option value="hooters-only">Hooters Only</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button type="button" class="btn-primary" id="btnSoundCheckFull">Quick Sound Check</button>
+          <button type="button" class="btn-secondary" id="btnSoundCheckHooter">Hooter Only</button>
+          <button type="button" class="btn-secondary" id="btnSoundCheckValidate">Sequence Validation</button>
+          <button type="button" class="btn-secondary" id="btnSoundCheckStop">Stop</button>
+        </div>
+        <div id="soundCheckReport" aria-live="polite" style="margin-top:14px">No tests run yet.</div>
+        <p class="small muted" style="margin-top:12px">Quick Sound Check plays the real audio files with shortened gaps so you can check volume. Sequence Validation checks the real event scheduler's timing, order and game rules. Neither test changes tournament settings or history. The app can report playback completion, but you must confirm that sound is audible through your speaker.</p>
+      </div>
     </section>
   </main>
 
@@ -1435,7 +1454,7 @@
       function subscribe(listener) { if (typeof listener !== "function") throw new Error("Listener must be a function."); listeners.add(listener); return () => listeners.delete(listener); }
       function getEventLog() { return clone(state.eventLog); }
 
-      return Object.freeze({ configure, allocateFixtures, start, pause, resume, cancel, tick, restore, subscribe, getSnapshot, getEventLog });
+      return Object.freeze({ configure, allocateFixtures, start, pause, resume, cancel, tick, restore, subscribe, getSnapshot, getEventLog, validateGame });
     })();
 
 
@@ -1468,6 +1487,11 @@
       let unsubscribe = null;
       let lastSnapshot = null;
       let unlockListenerInstalled = false;
+      let soundCheckRunId = 0;
+      let soundCheckAbort = false;
+      let soundCheckBusy = false;
+      let soundCheckLog = [];
+      let playbackQueue = Promise.resolve();
 
       function readFired() {
         try {
@@ -1662,7 +1686,13 @@
         return events;
       }
 
-      async function playEvent(event) {
+      function playEvent(event) {
+        const task = playbackQueue.then(() => playEventNow(event));
+        playbackQueue = task.catch(() => false);
+        return task;
+      }
+
+      async function playEventNow(event) {
         if (!enabled || !unlocked || fired.has(event.id)) return false;
 
         ensureAudio();
@@ -1673,13 +1703,18 @@
           audio.pause();
           audio.currentTime = 0;
           await audio.play();
+          // Do not start another clip until this one has finished. The
+          // fallback prevents a missing ended event from blocking the queue.
+          await new Promise(resolve => {
+            let settled = false;
+            const finish = () => { if (!settled) { settled = true; audio.removeEventListener("ended", finish); clearTimeout(fallback); resolve(); } };
+            const fallback = setTimeout(finish, Math.max(2500, (Number.isFinite(audio.duration) ? audio.duration * 1000 : 7000) + 1500));
+            audio.addEventListener("ended", finish, { once: true });
+          });
           fired.add(event.id);
           persistFired();
           return true;
         } catch (error) {
-          // Record the failed attempt to prevent repeated overlapping
-          // attempts. The console warning makes device/browser failures
-          // visible during testing.
           fired.add(event.id);
           persistFired();
           console.warn(`Tournament audio playback failed (${event.clip}):`, error);
@@ -1800,6 +1835,109 @@
         return getStatus();
       }
 
+      function getClipLabel(clip) {
+        return ({ warning60: "60-second warning", fieldCall: "Field-of-play call", warning30: "30-second warning", standby: "Standby", hooter: "Hooter" })[clip] || clip;
+      }
+
+      async function runSoundCheck(kind = "full", audioMode = "announced", onUpdate = () => {}) {
+        if (soundCheckBusy) throw new Error("A Sound Check is already running.");
+        soundCheckBusy = true;
+        soundCheckAbort = false;
+        const runId = ++soundCheckRunId;
+        soundCheckLog = [];
+        const record = (status, detail) => {
+          const item = { at: new Date().toLocaleTimeString(), status, detail };
+          soundCheckLog.push(item);
+          try { onUpdate({ running: soundCheckBusy, log: [...soundCheckLog], item }); } catch (_) {}
+        };
+        try {
+          const unlockedNow = await unlock();
+          if (!unlockedNow) throw new Error("Audio could not be unlocked. Tap the test button again and allow audio playback.");
+          ensureAudio();
+          const mode = audioMode === "hooters-only" ? "hooters-only" : "announced";
+          const base = Date.now() + 1000;
+          const mock = {
+            status: "running", audioMode: mode, gameIndex: 0,
+            game: { id: `sound-check-${runId}`, halves: 2 },
+            phase: { type: mode === "announced" ? "pre-game-warning" : "half-1" },
+            phaseStartedAt: mode === "announced" ? base - 65000 : base,
+            phaseEndsAt: base
+          };
+          let events = scheduleFor(mock);
+          if (kind === "hooter") events = [{ id: `sound-check-${runId}:hooter`, at: base, clip: "hooter" }];
+          // The same production scheduler creates this event list. For the
+          // operational check, preserve its order but compress the gaps.
+          const ordered = events.slice().sort((a,b) => a.at - b.at);
+          if (kind === "full" && mode === "announced" && ordered.length !== 5) throw new Error("The announced sequence did not produce all five expected events.");
+          if (kind === "full" && mode === "hooters-only" && ordered.length !== 1) throw new Error("Hooters Only should produce one start hooter.");
+          record("info", `${kind === "hooter" ? "Hooter-only check" : "Quick sound check"} started (${mode === "announced" ? "Announced Fixtures" : "Hooters Only"}).`);
+          for (let i = 0; i < ordered.length; i++) {
+            if (soundCheckAbort || runId !== soundCheckRunId) { record("stopped", "Test stopped by organiser."); return { passed: false, stopped: true, log: [...soundCheckLog] }; }
+            const event = ordered[i];
+            record("playing", getClipLabel(event.clip));
+            const ok = await playEvent({ ...event, id: `sound-check-${runId}:${event.clip}:${i}` });
+            record(ok ? "pass" : "fail", `${getClipLabel(event.clip)} ${ok ? "playback completed" : "playback failed"}.`);
+            if (!ok) throw new Error(`Playback failed: ${getClipLabel(event.clip)}.`);
+            if (i < ordered.length - 1) await new Promise(resolve => setTimeout(resolve, kind === "hooter" ? 0 : 650));
+          }
+          record("pass", "Sound Check completed. Confirm the sound is audible at the required volume.");
+          return { passed: true, log: [...soundCheckLog] };
+        } catch (error) {
+          record("fail", error.message || "Sound Check failed.");
+          return { passed: false, error: error.message, log: [...soundCheckLog] };
+        } finally {
+          if (runId === soundCheckRunId) { soundCheckBusy = false; soundCheckAbort = false; }
+          try { onUpdate({ running: soundCheckBusy, log: [...soundCheckLog], complete: true }); } catch (_) {}
+        }
+      }
+
+      function stopSoundCheck() {
+        soundCheckAbort = true;
+        Object.values(audioElements).forEach(audio => { try { audio.pause(); audio.currentTime = 0; } catch (_) {} });
+        return { stopped: true };
+      }
+
+      function validateSequence(audioMode = "announced") {
+        const mode = audioMode === "hooters-only" ? "hooters-only" : "announced";
+        const target = 1000000;
+        const snapshot = { status: "running", audioMode: mode, gameIndex: 0,
+          game: { id: "validation-game", halves: 2 }, phase: { type: "half-time" },
+          phaseStartedAt: target - 120000, phaseEndsAt: target };
+        const secondHalf = scheduleFor(snapshot).sort((a,b) => a.at - b.at);
+        const expectedAnnounced = ["warning60", "fieldCall", "warning30", "standby", "hooter"];
+        const expectedHooters = ["hooter"];
+        const expected = mode === "announced" ? expectedAnnounced : expectedHooters;
+        const secondHalfOrder = secondHalf.map(e => e.clip);
+        const checks = [];
+        const check = (name, pass, detail) => checks.push({ name, pass, detail });
+        check("Second-half event order", JSON.stringify(secondHalfOrder) === JSON.stringify(expected), secondHalfOrder.join(" → "));
+        if (mode === "announced") {
+          const byClip = Object.fromEntries(secondHalf.map(e => [e.clip, e.at]));
+          check("60-second warning offset", byClip.warning60 === target - 63474, "Starts 63.474 seconds before play; includes the recorded clip lead-in.");
+          check("Field-of-play call offset", byClip.fieldCall === target - 57000, "Starts 57 seconds before play.");
+          check("30-second warning offset", byClip.warning30 === target - 30000, "Starts 30 seconds before play.");
+          check("Standby offset", byClip.standby === target - 10000, "Starts 10 seconds before play.");
+        }
+        const firstHalfEnd = scheduleFor({ ...snapshot, phase: { type: "half-1" }, phaseEndsAt: target - 120000, phaseStartedAt: target - 240000 });
+        check("First-half end hooter", firstHalfEnd.some(e => e.clip === "hooter" && e.at === target - 120000), "Hooter is scheduled at the first-half end.");
+        let minimumPassed = true;
+        try { TournamentTimerEngine.validateGame({ label: "Validation", halves: 2, halfDurationSeconds: 60, halfTimeSeconds: 120 }, 0, mode); }
+        catch (_) { minimumPassed = false; }
+        check("Announced half-time minimum", minimumPassed, mode === "announced" ? "A two-half game with 120 seconds is accepted." : "Hooters Only does not impose the 120-second minimum.");
+        let shortIntervalRejected = false;
+        try { TournamentTimerEngine.validateGame({ label: "Validation", halves: 2, halfDurationSeconds: 60, halfTimeSeconds: 119 }, 0, "announced"); }
+        catch (_) { shortIntervalRejected = true; }
+        check("Short announced half-time rejected", mode !== "announced" || shortIntervalRejected, "A 119-second half-time is rejected in Announced Fixtures mode.");
+        let singleHalfAccepted = true;
+        try { TournamentTimerEngine.validateGame({ label: "Validation", halves: 1, halfDurationSeconds: 60, halfTimeSeconds: 0 }, 0, "announced"); }
+        catch (_) { singleHalfAccepted = false; }
+        check("Single-half game exempt", singleHalfAccepted, "Single-half games do not require a half-time interval.");
+        const extraTimeEnd = scheduleFor({ ...snapshot, phase: { type: "extra-time" }, phaseEndsAt: target });
+        check("Result-required extra-time hooter", extraTimeEnd.some(e => e.clip === "hooter" && e.at === target), "Final hooter is scheduled at the end of extra time.");
+        const passed = checks.every(c => c.pass);
+        return { passed, checks, summary: `${checks.filter(c => c.pass).length}/${checks.length} checks passed.` };
+      }
+
       function getStatus() {
         return {
           enabled,
@@ -1821,6 +1959,9 @@
         stop,
         setEnabled,
         resetHistory,
+        runSoundCheck,
+        stopSoundCheck,
+        validateSequence,
         getStatus
       });
     })();
@@ -2734,6 +2875,43 @@
     document.getElementById("navTournamentTimer").addEventListener("click", () => {
       showApplicationModule("tournamentTimer");
     });
+
+    // Permanent, isolated organiser Sound Check. It never configures,
+    // starts, cancels or writes to the live tournament timer.
+    (() => {
+      const modeEl = document.getElementById("soundCheckMode");
+      const statusEl = document.getElementById("soundCheckStatus");
+      const reportEl = document.getElementById("soundCheckReport");
+      const fullBtn = document.getElementById("btnSoundCheckFull");
+      const hooterBtn = document.getElementById("btnSoundCheckHooter");
+      const validateBtn = document.getElementById("btnSoundCheckValidate");
+      const stopBtn = document.getElementById("btnSoundCheckStop");
+      const controller = window.NTLApp?.tournamentAudio;
+      if (!controller || !fullBtn) return;
+      const renderLog = (log) => {
+        reportEl.innerHTML = log.length ? `<ul style="padding-left:20px;margin:0">${log.map(item => `<li><strong>${item.status.toUpperCase()}</strong> · ${item.at} · ${String(item.detail).replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch]))}</li>`).join("")}</ul>` : "No test events yet.";
+      };
+      const setBusy = busy => { fullBtn.disabled = hooterBtn.disabled = validateBtn.disabled = busy; stopBtn.disabled = !busy; };
+      const run = async kind => {
+        setBusy(true); statusEl.textContent = "Preparing audio…"; reportEl.textContent = "Starting test…";
+        await controller.runSoundCheck(kind, modeEl.value, update => {
+          renderLog(update.log || []);
+          if (update.item) statusEl.textContent = update.item.detail;
+        });
+        const last = controller.getStatus();
+        statusEl.textContent = "Test finished. Check the report and confirm the speaker is audible.";
+        setBusy(false);
+      };
+      fullBtn.addEventListener("click", () => run("full"));
+      hooterBtn.addEventListener("click", () => run("hooter"));
+      stopBtn.addEventListener("click", () => { controller.stopSoundCheck(); statusEl.textContent = "Stopping sound check…"; });
+      validateBtn.addEventListener("click", () => {
+        const result = controller.validateSequence(modeEl.value);
+        statusEl.textContent = result.passed ? `Sequence validation passed: ${result.summary}` : `Sequence validation failed: ${result.summary}`;
+        reportEl.innerHTML = `<p><strong>${result.passed ? "PASS" : "FAIL"} — ${result.summary}</strong></p><ul style="padding-left:20px;margin:0">${result.checks.map(c => `<li><strong>${c.pass ? "PASS" : "FAIL"}</strong> · ${c.name} — ${c.detail}</li>`).join("")}</ul>`;
+      });
+      stopBtn.disabled = true;
+    })();
 
     /* =========================================================
        12. START THE APP
