@@ -1664,7 +1664,7 @@
         hooter: "audio/hooter.mp3"
       };
 
-      const FIRED_KEY = "ntlTournamentAudioFiredV2";
+      const FIRED_KEY = "ntlTournamentAudioFiredV3";
       const WARNING_60_CLIP_MS = 3474;
       const WARNING_60_LEAD_MS = 60000;
       const LATE_EVENT_LIMIT_MS = 2500;
@@ -1675,6 +1675,12 @@
       let fired = new Set();
       let pendingEvents = new Map();
       let audioElements = {};
+      let audioContext = null;
+      let decodedBuffers = new Map();
+      let scheduledEvents = new Map();
+      let audioReady = false;
+      let audioLoadError = null;
+      let unlockPromise = null;
       let pollHandle = null;
       let unsubscribe = null;
       let lastSnapshot = null;
@@ -1683,7 +1689,7 @@
       let soundCheckAbort = false;
       let soundCheckBusy = false;
       let soundCheckLog = [];
-      let playbackQueue = Promise.resolve();
+      let soundCheckAudio = null;
 
       function readFired() {
         try {
@@ -1701,84 +1707,84 @@
         }
       }
 
-      // Use ONE persistent HTMLAudioElement for every clip. iOS Safari can
-      // reject playback when a different Audio element is created and played
-      // later outside the original user gesture. Reusing the same element
-      // keeps the playback permission associated with the organiser's tap.
-      let sharedAudioElement = null;
+      // Live tournament audio uses one Web Audio timeline. Every clip is
+      // decoded before play and scheduled against the timer engine's absolute
+      // timestamps. Sound Check continues to use its own isolated media element.
+      function getAudioContext() {
+        if (audioContext) return audioContext;
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) throw new Error("Web Audio is not supported by this browser.");
+        audioContext = new Ctx({ latencyHint: "interactive" });
+        return audioContext;
+      }
+
+      async function preloadAudio() {
+        const context = getAudioContext();
+        audioLoadError = null;
+        const entries = Object.entries(AUDIO_PATHS);
+        try {
+          for (const [key, path] of entries) {
+            if (decodedBuffers.has(key)) continue;
+            const response = await fetch(new URL(path, document.baseURI).href, { cache: "force-cache" });
+            if (!response.ok) throw new Error(`${path} returned HTTP ${response.status}.`);
+            const bytes = await response.arrayBuffer();
+            const buffer = await context.decodeAudioData(bytes.slice(0));
+            decodedBuffers.set(key, buffer);
+          }
+          audioReady = true;
+          return true;
+        } catch (error) {
+          audioReady = false;
+          audioLoadError = error?.message || String(error);
+          console.error("Tournament audio preload failed:", error);
+          throw error;
+        }
+      }
 
       function configure(paths = {}) {
         Object.keys(AUDIO_PATHS).forEach(key => {
           if (typeof paths[key] === "string" && paths[key].trim()) {
             AUDIO_PATHS[key] = paths[key].trim();
+            decodedBuffers.delete(key);
           }
         });
-        if (sharedAudioElement) {
-          try { sharedAudioElement.pause(); sharedAudioElement.src = AUDIO_PATHS.hooter; sharedAudioElement.load(); } catch (_) {}
-        }
+        audioReady = false;
+        audioLoadError = null;
         return getStatus();
       }
 
       function ensureAudio() {
-        if (typeof Audio === "undefined") return;
-        if (!sharedAudioElement) {
-          sharedAudioElement = new Audio();
-          sharedAudioElement.preload = "auto";
-          sharedAudioElement.playsInline = true;
-        }
-        Object.keys(AUDIO_PATHS).forEach(key => { audioElements[key] = sharedAudioElement; });
+        try { getAudioContext(); } catch (error) { audioLoadError = error.message; }
       }
 
       function unlock() {
-        // Call from a direct user interaction. iOS Safari requires this
-        // gesture before it will allow later scheduled audio playback.
-        ensureAudio();
-        const element = audioElements.hooter || sharedAudioElement || new Audio();
-        // A media element with no source cannot be unlocked reliably. Load the
-        // real hooter asset first, then perform the muted play inside the
-        // organiser's direct click/tap gesture.
+        if (unlockPromise) return unlockPromise;
+        // Must be invoked directly from the organiser's Start/tap gesture.
+        // resume() is called synchronously before any await for iOS Safari.
         try {
-          const unlockSource = new URL(AUDIO_PATHS.hooter, document.baseURI).href;
-          if (element.src !== unlockSource) {
-            element.src = unlockSource;
-            element.load();
-          }
-        } catch (_) {}
-        const wasMuted = element.muted;
-        const previousVolume = element.volume;
-
-        element.muted = true;
-        element.volume = 0;
-
-        let attempt;
-        try {
-          attempt = element.play();
+          const context = getAudioContext();
+          const resumePromise = context.resume();
+          unlockPromise = (async () => {
+            try {
+              await resumePromise;
+              await preloadAudio();
+              unlocked = context.state === "running";
+              return unlocked;
+            } catch (error) {
+              unlocked = false;
+              audioLoadError = error?.message || String(error);
+              console.warn("Tournament audio could not be prepared:", error);
+              return false;
+            } finally {
+              unlockPromise = null;
+            }
+          })();
+          return unlockPromise;
         } catch (error) {
-          element.muted = wasMuted;
-          element.volume = previousVolume;
+          unlocked = false;
+          audioLoadError = error?.message || String(error);
           return Promise.resolve(false);
         }
-
-        if (attempt && typeof attempt.then === "function") {
-          return attempt.then(() => {
-            element.pause();
-            try { element.currentTime = 0; } catch (_) {}
-            element.muted = wasMuted;
-            element.volume = previousVolume;
-            unlocked = true;
-            return true;
-          }).catch(() => {
-            element.muted = wasMuted;
-            element.volume = previousVolume;
-            return false;
-          });
-        }
-
-        element.pause();
-        element.muted = wasMuted;
-        element.volume = previousVolume;
-        unlocked = true;
-        return Promise.resolve(true);
       }
 
       function installUnlockGesture() {
@@ -1858,7 +1864,7 @@
               },
               {
                 id: `${token}:warning30`,
-                at: playStartAt - 30000,
+                at: playStartAt - 30000 + ((decodedBuffers.get("warningBeeps")?.duration || 2.5) * 1000),
                 clip: "warning30"
               },
               {
@@ -1891,79 +1897,60 @@
         return events;
       }
 
-      function playEvent(event) {
-        const task = playbackQueue.then(() => playEventNow(event));
-        playbackQueue = task.catch(() => false);
-        return task;
-      }
-
-      async function playEventNow(event) {
-        if (!enabled || !unlocked || fired.has(event.id)) return false;
-
-        ensureAudio();
-        const audio = sharedAudioElement;
-        if (!audio || !AUDIO_PATHS[event.clip]) return false;
-
-        try {
-          audio.pause();
-          const nextSource = new URL(AUDIO_PATHS[event.clip], document.baseURI).href;
-          if (audio.src !== nextSource) {
-            audio.src = nextSource;
-            audio.load();
-          }
-          try { audio.currentTime = 0; } catch (_) {}
-          // This function is deliberately called synchronously for the first
-          // Sound Check clip from the button handler, before any await/queue.
-          await audio.play();
-          // Do not start another clip until this one has finished. The
-          // fallback prevents a missing ended event from blocking the queue.
-          await new Promise(resolve => {
-            let settled = false;
-            const finish = () => { if (!settled) { settled = true; audio.removeEventListener("ended", finish); clearTimeout(fallback); resolve(); } };
-            const fallback = setTimeout(finish, Math.max(2500, (Number.isFinite(audio.duration) ? audio.duration * 1000 : 7000) + 1500));
-            audio.addEventListener("ended", finish, { once: true });
-          });
+      function scheduleAudioEvent(event) {
+        if (!enabled || !unlocked || !audioReady || fired.has(event.id) || scheduledEvents.has(event.id)) return false;
+        const context = audioContext;
+        const buffer = decodedBuffers.get(event.clip);
+        if (!context || !buffer) {
+          console.warn("Tournament audio asset is not ready:", event.clip);
+          return false;
+        }
+        const delayMs = event.at - Date.now();
+        if (delayMs < -LATE_EVENT_LIMIT_MS) {
           fired.add(event.id);
           persistFired();
+          console.warn("Tournament audio event missed; it was discovered after its scheduled time:", event.clip, { lateByMs: -delayMs });
+          return false;
+        }
+        try {
+          const source = context.createBufferSource();
+          source.buffer = buffer;
+          source.connect(context.destination);
+          const startAt = context.currentTime + Math.max(0, delayMs / 1000);
+          scheduledEvents.set(event.id, { source, event, startAt });
+          source.onended = () => {
+            // stop() is also used to cancel future events on pause/reset.
+            // A cancelled source must not be recorded as successfully fired.
+            if (!scheduledEvents.has(event.id)) return;
+            scheduledEvents.delete(event.id);
+            fired.add(event.id);
+            persistFired();
+          };
+          source.start(startAt);
           return true;
         } catch (error) {
-          fired.add(event.id);
-          persistFired();
-          const detail = `${error?.name || "PlaybackError"}: ${error?.message || String(error)}`;
-          console.warn(`Tournament audio playback failed (${event.clip}): ${detail}`, error);
-          return { ok: false, error: detail };
+          console.error(`Tournament audio scheduling failed (${event.clip}):`, error);
+          return false;
         }
       }
 
       function processDue(snapshot) {
         if (!active || !enabled || !["running", "completed"].includes(snapshot?.status)) return;
-
-        if (snapshot.status === "running") addEvents(scheduleFor(snapshot));
-
-        const currentTime = Date.now();
-        const due = [...pendingEvents.values()]
-          .filter(event => currentTime >= event.at)
-          .sort((a, b) => a.at - b.at);
-
-        due.forEach(event => {
-          pendingEvents.delete(event.id);
-
-          if (fired.has(event.id)) return;
-
-          if (currentTime - event.at <= LATE_EVENT_LIMIT_MS) {
-            if (!unlocked) {
-              fired.add(event.id);
-              persistFired();
-              console.warn("Tournament audio event could not play because audio has not been unlocked:", event.clip);
-              return;
+        if (snapshot.status === "running") {
+          const events = scheduleFor(snapshot);
+          events.forEach(event => {
+            if (!fired.has(event.id) && !scheduledEvents.has(event.id)) {
+              pendingEvents.set(event.id, event);
             }
-            playEvent(event);
-          } else {
-            fired.add(event.id);
-            persistFired();
-            console.warn("Tournament audio event missed while page was suspended:", event.clip);
-          }
-        });
+          });
+        }
+
+        // Schedule future events immediately on discovery. The browser's
+        // audio clock, not a JavaScript interval, determines their start time.
+        for (const [id, event] of [...pendingEvents.entries()]) {
+          if (fired.has(id)) { pendingEvents.delete(id); continue; }
+          if (scheduleAudioEvent(event)) pendingEvents.delete(id);
+        }
       }
 
       function onSnapshot(snapshot) {
@@ -1977,9 +1964,15 @@
           processDue(snapshot);
           pendingEvents.clear();
         } else if (snapshot?.status === "idle" || snapshot?.status === "paused") {
-          // A pause changes the phase end timestamp on resume. Discard old
-          // pending warning times; the resumed snapshot will schedule fresh IDs.
+          // A pause changes the phase end timestamp on resume. Cancel future
+          // scheduled audio and rebuild against the resumed absolute timeline.
           pendingEvents.clear();
+          for (const [id, item] of [...scheduledEvents.entries()]) {
+            if (item.startAt > (audioContext?.currentTime || 0) + 0.03) {
+              try { item.source.stop(); } catch (_) {}
+              scheduledEvents.delete(id);
+            }
+          }
         }
       }
 
@@ -2028,20 +2021,30 @@
         if (unsubscribe) unsubscribe();
         unsubscribe = null;
 
-        if (sharedAudioElement) { try { sharedAudioElement.pause(); } catch (_) {} }
-
+        for (const [id, item] of [...scheduledEvents.entries()]) {
+          try { item.source.stop(); } catch (_) {}
+          scheduledEvents.delete(id);
+        }
+        pendingEvents.clear();
         return getStatus();
       }
 
       function setEnabled(value) {
         enabled = Boolean(value);
-        if (!enabled) pendingEvents.clear();
+        if (!enabled) {
+          pendingEvents.clear();
+          for (const [id, item] of [...scheduledEvents.entries()]) {
+            try { item.source.stop(); } catch (_) {}
+            scheduledEvents.delete(id);
+          }
+        }
         return getStatus();
       }
 
       function resetHistory() {
         fired.clear();
         pendingEvents.clear();
+        scheduledEvents.clear();
         persistFired();
         return getStatus();
       }
@@ -2151,7 +2154,7 @@
           check("60-second warning offset", byClip.warning60 === target - 63474, "Starts 63.474 seconds before play; includes the recorded clip lead-in.");
           check("Field-of-play call offset", byClip.fieldCall === target - 57000, "Starts 57 seconds before play.");
           check("Five warning beeps offset", byClip.warningBeeps === target - 30000, "Beep file is queued at the 30-second warning point, before the spoken announcement.");
-          check("30-second warning offset", byClip.warning30 === target - 30000, "Starts 30 seconds before play.");
+          check("30-second warning follows beeps", byClip.warning30 > byClip.warningBeeps, "The spoken announcement starts after the five-beep recording finishes.");
           check("Standby offset", byClip.standby === target - 10000, "Starts 10 seconds before play.");
         }
         const firstHalfEnd = scheduleFor({ ...snapshot, phase: { type: "half-1" }, phaseEndsAt: target - 120000, phaseStartedAt: target - 240000 });
@@ -2181,12 +2184,15 @@
           active,
           audioFiles: { ...AUDIO_PATHS },
           firedCount: fired.size,
-          pendingCount: pendingEvents.size
+          pendingCount: pendingEvents.size,
+          scheduledCount: scheduledEvents.size,
+          audioReady,
+          audioContextState: audioContext?.state || "unavailable",
+          audioLoadError
         };
       }
 
       readFired();
-      ensureAudio();
 
       return Object.freeze({
         configure,
