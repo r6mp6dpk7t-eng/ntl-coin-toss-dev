@@ -1,3 +1,5 @@
+
+
 <!DOCTYPE html>
 <html lang="en-GB">
 <head>
@@ -877,6 +879,30 @@
       overflow-wrap:anywhere;
     }
 
+
+    /* =========================================================
+       REVISED NAVIGATION AND SETTINGS DIALOG
+       ========================================================= */
+    body { padding-bottom: 94px; }
+    .timer-primary-nav { display:flex; align-items:stretch; gap:10px; margin:0 0 16px; }
+    .timer-primary-tabs { flex:1; display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:5px; background:var(--bg-card); border:1px solid var(--border-color); border-radius:14px; }
+    .timer-primary-tabs button { min-height:54px; border:0; border-radius:10px; background:transparent; color:var(--text-muted); font-size:1rem; font-weight:750; }
+    .timer-primary-tabs button.active { background:var(--ntl-green); color:#fff; }
+    .settings-cog { flex:0 0 64px; min-height:64px; border-radius:14px; border:1px solid var(--border-color); background:var(--bg-card); color:var(--text-main); font-size:2rem; }
+    .app-bottom-nav { position:fixed; z-index:100; left:0; right:0; bottom:0; display:grid; grid-template-columns:1fr 1fr; gap:0; padding:9px max(12px, env(safe-area-inset-left)) calc(9px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-right)); background:var(--bg-card); border-top:1px solid var(--border-color); box-shadow:0 -8px 24px rgba(0,0,0,.12); }
+    .app-bottom-nav button { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; min-height:58px; border:0; border-radius:10px; background:transparent; color:var(--text-muted); font-size:.82rem; font-weight:750; }
+    .app-bottom-nav button.active { color:var(--ntl-green); }
+    .bottom-nav-icon { font-size:1.35rem; line-height:1.1; }
+    .settings-dialog { width:min(680px, calc(100% - 24px)); max-height:min(88dvh, 900px); margin:auto; padding:0; border:1px solid var(--border-color); border-radius:18px; background:var(--bg-page); color:var(--text-main); box-shadow:0 20px 70px rgba(0,0,0,.38); }
+    .settings-dialog::backdrop { background:rgba(4,10,20,.68); backdrop-filter:blur(3px); }
+    .settings-dialog-header { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; padding:16px 18px; background:var(--bg-card); border-bottom:1px solid var(--border-color); }
+    .settings-dialog-header h2 { font-size:1.3rem; }
+    .settings-close { width:42px; height:42px; border:1px solid var(--border-color); border-radius:10px; background:var(--bg-date); color:var(--text-main); font-size:1.1rem; }
+    .settings-dialog-content { padding:14px; overflow-y:auto; max-height:calc(min(88dvh, 900px) - 74px); }
+    .settings-section-nav { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:14px; }
+    .settings-section-nav button { min-height:46px; border:1px solid var(--border-color); border-radius:10px; background:var(--bg-card); color:var(--text-muted); font-weight:700; }
+    .settings-section-nav button.active { background:var(--ntl-green); border-color:var(--ntl-green); color:#fff; }
+    @media (max-width:600px) { body { padding-bottom:100px; } .timer-primary-tabs button { min-height:52px; } .settings-cog { flex-basis:58px; min-height:62px; } .settings-dialog { width:calc(100% - 16px); max-height:88dvh; } .settings-dialog-content { padding:10px; } }
   </style>
 </head>
 
@@ -887,14 +913,6 @@
       <span>NOTTINGHAM TOUCH LEAGUES</span>
     </header>
 
-    <nav class="module-nav" aria-label="Application sections">
-      <button type="button" class="active" id="navCoinToss" aria-controls="coinTossView" aria-selected="true">
-        Coin Toss
-      </button>
-      <button type="button" id="navTournamentTimer" aria-controls="tournamentTimerView" aria-selected="false">
-        Tournament Timer
-      </button>
-    </nav>
 
     <section id="coinTossView" class="module-view" aria-label="Coin Toss">
     <!-- =====================================================
@@ -1029,10 +1047,12 @@
     </section>
 
     <section id="tournamentTimerView" class="module-view" aria-label="Tournament Timer" hidden>
-      <nav class="module-nav" aria-label="Tournament timer sections" style="margin:0 0 16px">
-        <button type="button" class="active" data-timer-tab="live">Timer</button>
-        <button type="button" data-timer-tab="settings">Settings</button>
-        <button type="button" data-timer-tab="history">History</button>
+      <nav class="timer-primary-nav" aria-label="Tournament timer sections">
+        <div class="timer-primary-tabs">
+          <button type="button" class="active" data-timer-tab="live">Timer</button>
+          <button type="button" data-timer-tab="setup">Set-up</button>
+        </div>
+        <button type="button" class="settings-cog" id="btnOpenSettings" aria-label="Open settings" title="Settings">&#9881;</button>
       </nav>
       <section id="timerLiveTab" class="timer-tab">
         <div class="panel" id="timerIdlePanel">
@@ -1056,7 +1076,7 @@
           <p class="small muted" id="liveRecoveryNote" style="margin-top:12px">Timer state is timestamp-driven and will recover when you return to the app. Browser background audio depends on device and browser support.</p>
         </div>
       </section>
-      <section id="timerSettingsTab" class="timer-tab" hidden>
+      <section id="timerSetupTab" class="timer-tab" hidden>
         <div class="panel" id="timerSetupPanel">
           <h2>Set up tournament timer</h2>
           <p class="panel-help">Configure one match format and the number of fixture time slots. The timer repeats that format automatically.</p>
@@ -1079,6 +1099,32 @@
           <p id="setupValidation" class="small muted" aria-live="polite">Settings are saved automatically on this device.</p>
           <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px"><button type="button" class="btn-primary" id="btnSaveTimerSetup">Save settings</button><button type="button" class="btn-outline" id="btnStartTournament">Start tournament</button></div>
         </div>
+
+      </section>
+    </section>
+  </main>
+
+  <nav class="app-bottom-nav" aria-label="Application sections">
+    <button type="button" id="navCoinToss" aria-controls="coinTossView" aria-selected="true">
+      <span class="bottom-nav-icon" aria-hidden="true">&#9678;</span><span>Coin Toss</span>
+    </button>
+    <button type="button" class="active" id="navTournamentTimer" aria-controls="tournamentTimerView" aria-selected="false">
+      <span class="bottom-nav-icon" aria-hidden="true">&#9201;</span><span>Tournament Timer</span>
+    </button>
+  </nav>
+
+  <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsDialogTitle">
+    <div class="settings-dialog-header">
+      <h2 id="settingsDialogTitle">Settings</h2>
+      <button type="button" id="btnCloseSettings" class="settings-close" aria-label="Close settings">&#10005;</button>
+    </div>
+    <div class="settings-dialog-content">
+      <div class="settings-section-nav" role="tablist" aria-label="Settings sections">
+        <button type="button" class="active" data-settings-section="sound">Audio & Sound Check</button>
+        <button type="button" data-settings-section="history">History</button>
+      </div>
+      <section id="settingsSoundSection" class="settings-section">
+        <div class="panel"><h3>Audio settings</h3><p class="panel-help">Choose the audio mode used by the tournament timer. The active tournament retains the mode selected when it was started.</p><p class="small muted">Change the audio mode in Set-up before starting a tournament.</p></div>
         <div class="panel" id="soundCheckPanel">
           <h2>Sound Check</h2>
         <p id="soundCheckStatus" aria-live="polite">Ready. Tap a test to begin.</p>
@@ -1097,13 +1143,12 @@
         </div>
         <div id="soundCheckReport" aria-live="polite" style="margin-top:14px">No tests run yet.</div>
         <p class="small muted" style="margin-top:12px">Quick Sound Check plays the real audio files with shortened gaps so you can check volume. Sequence Validation checks the real event scheduler's timing, order and game rules. Neither test changes tournament settings or history. The app can report playback completion, but you must confirm that sound is audible through your speaker.</p>
-        </div>
+        </div>      </section>
+      <section id="settingsHistorySection" class="settings-section" hidden>
+        <div class="panel"><h3>Tournament history</h3><p class="panel-help">The current session event log is shown here. Completed sessions remain in application history.</p><div id="timerHistoryOutput" aria-live="polite">No timer events recorded yet.</div></div>
       </section>
-      <section id="timerHistoryTab" class="timer-tab" hidden>
-        <div class="panel"><h2>Tournament history</h2><p class="panel-help">The current session event log is shown here. Completed sessions remain in application history.</p><div id="timerHistoryOutput" aria-live="polite">No timer events recorded yet.</div></div>
-      </section>
-    </section>
-  </main>
+    </div>
+  </dialog>
 
   <script>
     /* =========================================================
@@ -3149,10 +3194,20 @@
       formIds.forEach(id => $(id).addEventListener("change", () => saveSettings(false)));
       function setTimerTab(tab) {
         document.querySelectorAll("[data-timer-tab]").forEach(b => b.classList.toggle("active", b.dataset.timerTab === tab));
-        $("timerLiveTab").hidden = tab !== "live"; $("timerSettingsTab").hidden = tab !== "settings"; $("timerHistoryTab").hidden = tab !== "history";
-        if (tab === "history") renderHistory(TournamentTimerEngine.getSnapshot());
+        $("timerLiveTab").hidden = tab !== "live";
+        $("timerSetupTab").hidden = tab !== "setup";
       }
       document.querySelectorAll("[data-timer-tab]").forEach(b => b.addEventListener("click", () => setTimerTab(b.dataset.timerTab)));
+      const settingsDialog = $("settingsDialog");
+      $("btnOpenSettings").addEventListener("click", () => { renderHistory(TournamentTimerEngine.getSnapshot()); settingsDialog.showModal(); });
+      $("btnCloseSettings").addEventListener("click", () => settingsDialog.close());
+      settingsDialog.addEventListener("click", event => { if (event.target === settingsDialog) settingsDialog.close(); });
+      document.querySelectorAll("[data-settings-section]").forEach(button => button.addEventListener("click", () => {
+        document.querySelectorAll("[data-settings-section]").forEach(item => item.classList.toggle("active", item === button));
+        $("settingsSoundSection").hidden = button.dataset.settingsSection !== "sound";
+        $("settingsHistorySection").hidden = button.dataset.settingsSection !== "history";
+        if (button.dataset.settingsSection === "history") renderHistory(TournamentTimerEngine.getSnapshot());
+      }));
       async function requestWakeLock() {
         try { if ("wakeLock" in navigator && !wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (_) { /* Optional browser capability. */ }
       }
@@ -3184,7 +3239,7 @@
       }
       $("btnStartTournament").addEventListener("click", startTournament);
       $("btnStartTournamentLive").addEventListener("click", startTournament);
-      $("btnOpenTimerSettings").addEventListener("click", () => setTimerTab("settings"));
+      $("btnOpenTimerSettings").addEventListener("click", () => setTimerTab("setup"));
       $("btnPauseResume").addEventListener("click", async () => {
         try { const snap = TournamentTimerEngine.getSnapshot(); if (snap.status === "running") { await TournamentTimerEngine.pause(); await releaseWakeLock(); } else if (snap.status === "paused") { await TournamentTimerEngine.resume(); await requestWakeLock(); } renderLive(TournamentTimerEngine.getSnapshot()); } catch (error) { $("liveRecoveryNote").textContent = error.message; }
       });
@@ -3268,3 +3323,7 @@
   </script>
 </body>
 </html>
+
+
+
+
