@@ -934,10 +934,42 @@
     </section>
 
     <section id="tournamentTimerView" class="module-view" aria-label="Tournament Timer" hidden>
-      <h2>Tournament Timer</h2>
-      <p>The tournament timer engine is ready. Sound Check lets you verify the speaker and validate the audio sequence without changing a live tournament.</p>
-      <div class="panel" id="soundCheckPanel" style="margin-top:16px">
-        <h3>Sound Check</h3>
+      <nav class="module-nav" aria-label="Tournament timer sections" style="margin:0 0 16px">
+        <button type="button" class="active" data-timer-tab="live">Timer</button>
+        <button type="button" data-timer-tab="settings">Settings</button>
+        <button type="button" data-timer-tab="history">History</button>
+      </nav>
+      <section id="timerLiveTab" class="timer-tab">
+        <div class="panel" id="timerIdlePanel"><h2>Tournament timer ready</h2><p class="panel-help">Your timer is not running. Configure your fixture time slots in Settings, then start the tournament.</p><button type="button" class="btn-primary" id="btnOpenTimerSettings">Open settings</button></div>
+        <div class="panel" id="timerLivePanel" hidden style="margin-top:16px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><span class="diagnostics-tag" id="liveStatus">READY</span><strong id="liveSlot">FIXTURE TIME SLOT 1 OF 1</strong></div>
+          <div style="text-align:center;padding:28px 8px 22px">
+            <div id="livePhase" style="font-size:1.05rem;font-weight:800;letter-spacing:.12em;margin-bottom:8px">READY</div>
+            <div id="liveClock" style="font-size:clamp(4rem,18vw,8rem);font-weight:800;line-height:1;font-variant-numeric:tabular-nums">00:00</div>
+            <div id="liveClockCaption" class="small muted" style="margin-top:8px">ELAPSED PLAYING TIME</div>
+          </div>
+          <div style="border-top:1px solid var(--border,#ddd);padding-top:14px;display:flex;justify-content:space-between;align-items:center;gap:12px"><div><div class="small muted">NEXT FIXTURE TIME SLOT</div><strong id="liveNextSlot">—</strong></div><div id="liveNextCountdown" style="font-size:1.5rem;font-weight:750;font-variant-numeric:tabular-nums">—</div></div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-primary" id="btnPauseResume">Pause</button><button type="button" class="btn-outline" id="btnCancelTimer">Cancel timer</button></div>
+          <p class="small muted" id="liveRecoveryNote" style="margin-top:12px">Timer state is timestamp-driven and will recover when you return to the app. Browser background audio depends on device and browser support.</p>
+        </div>
+      </section>
+      <section id="timerSettingsTab" class="timer-tab" hidden>
+        <div class="panel" id="timerSetupPanel">
+          <h2>Set up tournament timer</h2>
+          <p class="panel-help">Configure one match format and the number of fixture time slots. The timer repeats that format automatically.</p>
+          <div class="form-row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px">
+            <div><label class="control-label" for="setupHalves">Match format</label><select id="setupHalves" class="form-control"><option value="2">Two halves</option><option value="1">Single half</option></select></div>
+            <div><label class="control-label" for="setupDuration">Playing time (minutes)</label><input id="setupDuration" class="form-control" type="number" min="1" max="120" step="1" value="10"></div>
+            <div><label class="control-label" for="setupHalfTime">Half-time (seconds)</label><input id="setupHalfTime" class="form-control" type="number" min="1" max="1800" step="1" value="120"></div>
+            <div><label class="control-label" for="setupInterval">Interval between slots (seconds)</label><input id="setupInterval" class="form-control" type="number" min="0" max="3600" step="1" value="120"></div>
+            <div><label class="control-label" for="setupSlots">Fixture time slot #</label><input id="setupSlots" class="form-control" type="number" min="1" max="100" step="1" value="1"></div>
+            <div><label class="control-label" for="setupAudioMode">Audio mode</label><select id="setupAudioMode" class="form-control"><option value="announced">Announced Fixtures</option><option value="hooters-only">Hooters Only</option></select></div>
+          </div>
+          <p id="setupValidation" class="small muted" aria-live="polite">Settings are saved automatically on this device.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px"><button type="button" class="btn-primary" id="btnSaveTimerSetup">Save settings</button><button type="button" class="btn-outline" id="btnStartTournament">Start tournament</button></div>
+        </div>
+        <div class="panel" id="soundCheckPanel">
+          <h2>Sound Check</h2>
         <p id="soundCheckStatus" aria-live="polite">Ready. Tap a test to begin.</p>
         <div class="form-row" style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0">
           <label for="soundCheckMode">Audio mode</label>
@@ -954,7 +986,11 @@
         </div>
         <div id="soundCheckReport" aria-live="polite" style="margin-top:14px">No tests run yet.</div>
         <p class="small muted" style="margin-top:12px">Quick Sound Check plays the real audio files with shortened gaps so you can check volume. Sequence Validation checks the real event scheduler's timing, order and game rules. Neither test changes tournament settings or history. The app can report playback completion, but you must confirm that sound is audible through your speaker.</p>
-      </div>
+        </div>
+      </section>
+      <section id="timerHistoryTab" class="timer-tab" hidden>
+        <div class="panel"><h2>Tournament history</h2><p class="panel-help">The current session event log is shown here. Completed sessions remain in application history.</p><div id="timerHistoryOutput" aria-live="polite">No timer events recorded yet.</div></div>
+      </section>
     </section>
   </main>
 
@@ -2926,6 +2962,133 @@
         reportEl.innerHTML = `<p><strong>${result.passed ? "PASS" : "FAIL"} — ${result.summary}</strong></p><ul style="padding-left:20px;margin:0">${result.checks.map(c => `<li><strong>${c.pass ? "PASS" : "FAIL"}</strong> · ${c.name} — ${c.detail}</li>`).join("")}</ul>`;
       });
       stopBtn.disabled = true;
+    })();
+
+    /* =========================================================
+       OPTION A — SIMPLE TOURNAMENT TIMER USER INTERFACE
+       Uses the existing timestamp-driven engine and persistence.
+       ========================================================= */
+    (() => {
+      const $ = id => document.getElementById(id);
+      const formIds = ["setupHalves", "setupDuration", "setupHalfTime", "setupInterval", "setupSlots", "setupAudioMode"];
+      const SETTINGS_KEY = "ntlSimpleTimerSetupV1";
+      let lastSnapshot = TournamentTimerEngine.getSnapshot();
+      let wakeLock = null;
+      let uiHeartbeat = null;
+      const readSettings = () => ({
+        halves: Number($("setupHalves").value), duration: Number($("setupDuration").value),
+        halfTime: Number($("setupHalfTime").value), interval: Number($("setupInterval").value),
+        slots: Number($("setupSlots").value), audioMode: $("setupAudioMode").value
+      });
+      const validateSettings = v => {
+        if (!Number.isInteger(v.duration) || v.duration < 1 || v.duration > 120) return "Playing time must be between 1 and 120 minutes.";
+        if (!Number.isInteger(v.slots) || v.slots < 1 || v.slots > 100) return "Fixture time slots must be between 1 and 100.";
+        if (v.halves === 2 && (!Number.isInteger(v.halfTime) || v.halfTime < 1 || v.halfTime > 1800)) return "Enter a valid half-time duration.";
+        if (v.interval < 0 || v.interval > 3600 || !Number.isInteger(v.interval)) return "Enter a valid interval between 0 and 3600 seconds.";
+        if (v.halves === 2 && v.audioMode === "announced" && v.halfTime < 120) return "Announced Fixtures requires at least 120 seconds of half-time for two-half matches.";
+        return "";
+      };
+      const updateHalfTimeControl = () => { const single = $("setupHalves").value === "1"; $("setupHalfTime").disabled = single; $("setupHalfTime").closest("div").style.opacity = single ? ".5" : "1"; };
+      try {
+        const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
+        if (saved) { $("setupHalves").value = String(saved.halves ?? 2); $("setupDuration").value = saved.duration ?? 10; $("setupHalfTime").value = saved.halfTime ?? 120; $("setupInterval").value = saved.interval ?? 120; $("setupSlots").value = saved.slots ?? 1; $("setupAudioMode").value = saved.audioMode || "announced"; }
+      } catch (_) {}
+      updateHalfTimeControl();
+      $("setupHalves").addEventListener("change", updateHalfTimeControl);
+      function saveSettings(showMessage = true) {
+        const v = readSettings(); const error = validateSettings(v);
+        $("setupValidation").textContent = error || (showMessage ? "Settings saved on this device." : "Settings are valid.");
+        $("setupValidation").style.color = error ? "#b42318" : "";
+        if (error) return false;
+        try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(v)); } catch (_) { $("setupValidation").textContent = "Browser storage is unavailable; settings may not persist."; }
+        return true;
+      }
+      $("btnSaveTimerSetup").addEventListener("click", () => saveSettings(true));
+      formIds.forEach(id => $(id).addEventListener("change", () => saveSettings(false)));
+      function setTimerTab(tab) {
+        document.querySelectorAll("[data-timer-tab]").forEach(b => b.classList.toggle("active", b.dataset.timerTab === tab));
+        $("timerLiveTab").hidden = tab !== "live"; $("timerSettingsTab").hidden = tab !== "settings"; $("timerHistoryTab").hidden = tab !== "history";
+        if (tab === "history") renderHistory(TournamentTimerEngine.getSnapshot());
+      }
+      document.querySelectorAll("[data-timer-tab]").forEach(b => b.addEventListener("click", () => setTimerTab(b.dataset.timerTab)));
+      async function requestWakeLock() {
+        try { if ("wakeLock" in navigator && !wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (_) { /* Optional browser capability. */ }
+      }
+      async function releaseWakeLock() { try { if (wakeLock) { await wakeLock.release(); wakeLock = null; } } catch (_) {} }
+      document.addEventListener("visibilitychange", async () => {
+        if (document.visibilityState === "visible") {
+          await TournamentTimerEngine.tick();
+          if (["running", "paused"].includes(TournamentTimerEngine.getSnapshot().status)) requestWakeLock();
+        }
+      });
+      async function startTournament() {
+        if (!saveSettings(false)) return;
+        const v = readSettings();
+        if (!["idle", "completed"].includes(TournamentTimerEngine.getSnapshot().status)) { $("setupValidation").textContent = "Cancel the current timer before starting a new tournament."; return; }
+        const games = Array.from({length:v.slots}, (_, i) => ({
+          id: `slot-${i+1}`, label: `Fixture Time Slot ${i+1}`, halves: v.halves,
+          halfDurationSeconds: v.duration * 60, halfTimeSeconds: v.halves === 2 ? v.halfTime : 0,
+          intervalAfterSeconds: i < v.slots - 1 ? v.interval : 0,
+          preGameWarningSeconds: 65, resultRequired: false
+        }));
+        try {
+          await TournamentTimerEngine.configure(games, {audioMode:v.audioMode, scheduleMode:"sequential"});
+          await TournamentTimerEngine.start();
+          await requestWakeLock();
+          setTimerTab("live");
+          $("timerSetupPanel").hidden = true; $("timerLivePanel").hidden = false;
+          renderLive(TournamentTimerEngine.getSnapshot());
+        } catch (error) { $("setupValidation").textContent = error.message; $("setupValidation").style.color = "#b42318"; }
+      }
+      $("btnStartTournament").addEventListener("click", startTournament);
+      $("btnOpenTimerSettings").addEventListener("click", () => setTimerTab("settings"));
+      $("btnPauseResume").addEventListener("click", async () => {
+        try { const snap = TournamentTimerEngine.getSnapshot(); if (snap.status === "running") { await TournamentTimerEngine.pause(); await releaseWakeLock(); } else if (snap.status === "paused") { await TournamentTimerEngine.resume(); await requestWakeLock(); } renderLive(TournamentTimerEngine.getSnapshot()); } catch (error) { $("liveRecoveryNote").textContent = error.message; }
+      });
+      $("btnCancelTimer").addEventListener("click", async () => {
+        if (!confirm("Cancel this tournament timer? Your settings will be retained.")) return;
+        await TournamentTimerEngine.cancel(); await releaseWakeLock(); $("timerLivePanel").hidden = true; $("timerIdlePanel").hidden = false; renderLive(TournamentTimerEngine.getSnapshot());
+      });
+      function formatClock(ms) { const total = Math.max(0, Math.floor(ms / 1000)); return `${String(Math.floor(total/60)).padStart(2,"0")}:${String(total%60).padStart(2,"0")}`; }
+      function renderLive(snap) {
+        lastSnapshot = snap;
+        const running = snap.status === "running", paused = snap.status === "paused";
+        $("liveStatus").textContent = running ? "RUNNING" : paused ? "PAUSED" : snap.status.toUpperCase();
+        $("liveSlot").textContent = `FIXTURE TIME SLOT ${Math.min(snap.gameIndex+1, Math.max(1,snap.gameCount))} OF ${snap.gameCount || readSettings().slots}`;
+        const phase = snap.phase?.type || "idle";
+        const elapsedPhases = ["half-1", "half-2"].includes(phase);
+        const label = ({"half-1":"FIRST HALF", "half-2":"SECOND HALF", "half-time":"HALF TIME", "between-games":"INTERVAL", "pre-game-warning":"PRE-MATCH WARNING", "scheduled-wait":"WAITING TO START", "result-interval":"RESULT INTERVAL", "extra-time":"EXTRA TIME", "result-required-interval":"INTERVAL", "idle":"READY"})[phase] || (snap.status === "completed" ? "TOURNAMENT COMPLETE" : phase.toUpperCase());
+        $("livePhase").textContent = snap.status === "completed" ? "TOURNAMENT COMPLETE" : label;
+        const clockMs = elapsedPhases ? snap.elapsedMs : snap.remainingMs;
+        $("liveClock").textContent = formatClock(clockMs);
+        $("liveClockCaption").textContent = elapsedPhases ? "ELAPSED PLAYING TIME" : (phase === "half-time" ? "TIME UNTIL SECOND HALF" : phase.includes("interval") || phase === "between-games" ? "TIME UNTIL NEXT FIXTURE SLOT" : "TIME REMAINING");
+        const nextIndex = snap.gameIndex + 1;
+        $("liveNextSlot").textContent = nextIndex < snap.gameCount ? `FIXTURE TIME SLOT ${nextIndex+1}` : "FINAL FIXTURE SLOT";
+        if (nextIndex < snap.gameCount) {
+          const game = snap.game || {};
+          let remainingToNext = snap.remainingMs;
+          if (phase === "pre-game-warning") remainingToNext += (game.halves === 2 ? game.halfDurationSeconds * 2 + game.halfTimeSeconds : game.halfDurationSeconds) * 1000 + (game.intervalAfterSeconds || 0) * 1000;
+          else if (phase === "half-1") remainingToNext += ((game.halves === 2 ? game.halfTimeSeconds + game.halfDurationSeconds : 0) + (game.intervalAfterSeconds || 0)) * 1000;
+          else if (phase === "half-time") remainingToNext += (game.halfDurationSeconds + (game.intervalAfterSeconds || 0)) * 1000;
+          else if (phase === "half-2") remainingToNext += (game.intervalAfterSeconds || 0) * 1000;
+          $("liveNextCountdown").textContent = formatClock(remainingToNext);
+        } else $("liveNextCountdown").textContent = "—";
+        $("btnPauseResume").textContent = paused ? "Resume" : "Pause";
+        $("btnPauseResume").disabled = !running && !paused;
+        $("btnCancelTimer").disabled = snap.status === "idle" || snap.status === "completed";
+        $("timerIdlePanel").hidden = running || paused || snap.status === "completed";
+        $("timerLivePanel").hidden = !(running || paused || snap.status === "completed");
+        renderHistory(snap);
+      }
+      function renderHistory(snap) {
+        const events = snap.eventLog || [];
+        $("timerHistoryOutput").innerHTML = events.length ? `<ol style="padding-left:22px">${events.slice().reverse().map(e => `<li><strong>${String(e.type).replace(/-/g," ")}</strong> — ${new Date(e.at).toLocaleTimeString("en-GB")}${e.phase ? ` · ${e.phase}` : ""}</li>`).join("")}</ol>` : "No timer events recorded yet.";
+      }
+      TournamentTimerEngine.subscribe(renderLive);
+      uiHeartbeat = setInterval(async () => { await TournamentTimerEngine.tick(); const snap = TournamentTimerEngine.getSnapshot(); if (snap.status === "completed") releaseWakeLock(); renderLive(snap); }, 500);
+      const restored = TournamentTimerEngine.getSnapshot();
+      if (["running", "paused", "completed"].includes(restored.status)) { $("timerIdlePanel").hidden = true; $("timerLivePanel").hidden = false; renderLive(restored); if (restored.status === "running") requestWakeLock(); }
+      window.addEventListener("pagehide", () => { /* Timestamp state persists; do not depend on this handler running. */ });
     })();
 
     /* =========================================================
