@@ -1047,12 +1047,12 @@
     <section id="tournamentTimerView" class="module-view" aria-label="Tournament Timer" hidden>
       <nav class="timer-primary-nav" aria-label="Tournament timer sections">
         <div class="timer-primary-tabs">
-          <button type="button" class="active" data-timer-tab="live">Timer</button>
-          <button type="button" data-timer-tab="setup">Set-up</button>
+          <button type="button" class="active" data-timer-tab="setup">Set-up</button>
+          <button type="button" data-timer-tab="live">Timer</button>
         </div>
         <button type="button" class="settings-cog" id="btnOpenSettings" aria-label="Open settings" title="Settings">&#9881;</button>
       </nav>
-      <section id="timerLiveTab" class="timer-tab">
+      <section id="timerLiveTab" class="timer-tab" hidden>
         <div class="panel" id="timerIdlePanel">
           <h2>Tournament timer ready</h2>
           <p class="panel-help">Review your saved configuration below. You can start the tournament here or change the settings.</p>
@@ -1071,11 +1071,11 @@
           </div>
           <div style="border-top:1px solid var(--border,#ddd);padding-top:14px;display:flex;justify-content:space-between;align-items:center;gap:12px"><div><div class="small muted">NEXT FIXTURE TIME SLOT</div><strong id="liveNextSlot">—</strong></div><div id="liveNextCountdown" style="font-size:1.5rem;font-weight:750;font-variant-numeric:tabular-nums">—</div></div>
           <div id="liveControlRow" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-primary" id="btnPauseResume">Pause</button><button type="button" class="btn-outline" id="btnCancelTimer">Cancel timer</button></div>
-          <div id="liveCompletionActions" hidden style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-primary" id="btnRunAgain">Run same tournament again</button><button type="button" class="btn-outline" id="btnNewTournamentSetup">Set up next tournament</button></div>
+          <div id="liveCompletionActions" hidden style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-primary" id="btnCloseCompleted">Close</button></div>
           <p class="small muted" id="liveRecoveryNote" style="margin-top:12px">Timer state is timestamp-driven and will recover when you return to the app. Browser background audio depends on device and browser support.</p>
         </div>
       </section>
-      <section id="timerSetupTab" class="timer-tab" hidden>
+      <section id="timerSetupTab" class="timer-tab">
         <div class="panel" id="timerSetupPanel">
           <h2>Set up tournament timer</h2>
           <p class="panel-help">Configure one match format and the number of fixture time slots. The timer repeats that format automatically.</p>
@@ -1095,8 +1095,8 @@
             <div class="setup-field"><label class="control-label" for="setupSlots">Fixture time slot #</label><input id="setupSlots" class="form-control" type="number" min="1" max="100" step="1" value="1"></div>
             <div class="setup-field"><label class="control-label" for="setupAudioMode">Audio mode</label><select id="setupAudioMode" class="form-control"><option value="announced">Announced Fixtures</option><option value="hooters-only">Hooters Only</option></select></div>
           </div>
-          <p id="setupValidation" class="small muted" aria-live="polite">Settings are saved automatically on this device.</p>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px"><button type="button" class="btn-primary" id="btnSaveTimerSetup">Save settings</button><button type="button" class="btn-outline" id="btnStartTournament">Start tournament</button></div>
+          <p id="setupValidation" class="small muted" aria-live="polite">Settings are saved automatically. Confirm them to review your tournament before starting.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px"><button type="button" class="btn-primary" id="btnConfirmTimerSetup">Confirm settings</button></div>
         </div>
 
       </section>
@@ -3189,7 +3189,12 @@
         return true;
       }
       renderSetupSummary();
-      $("btnSaveTimerSetup").addEventListener("click", () => saveSettings(true));
+      $("btnConfirmTimerSetup").addEventListener("click", () => {
+        if (!saveSettings(true)) return;
+        setTimerTab("live");
+        $("timerIdlePanel").hidden = false;
+        $("timerLivePanel").hidden = true;
+      });
       formIds.forEach(id => $(id).addEventListener("change", () => saveSettings(false)));
       function setTimerTab(tab) {
         document.querySelectorAll("[data-timer-tab]").forEach(b => b.classList.toggle("active", b.dataset.timerTab === tab));
@@ -3236,17 +3241,25 @@
           renderLive(TournamentTimerEngine.getSnapshot());
         } catch (error) { $("setupValidation").textContent = error.message; $("setupValidation").style.color = "#b42318"; }
       }
-      $("btnStartTournament").addEventListener("click", startTournament);
       $("btnStartTournamentLive").addEventListener("click", startTournament);
-      $("btnRunAgain").addEventListener("click", startTournament);
-      $("btnNewTournamentSetup").addEventListener("click", () => setTimerTab("setup"));
       $("btnOpenTimerSettings").addEventListener("click", () => setTimerTab("setup"));
+      $("btnCloseCompleted").addEventListener("click", () => {
+        $("timerLivePanel").hidden = true;
+        $("timerIdlePanel").hidden = false;
+        setTimerTab("live");
+        renderSetupSummary();
+      });
       $("btnPauseResume").addEventListener("click", async () => {
         try { const snap = TournamentTimerEngine.getSnapshot(); if (snap.status === "running") { await TournamentTimerEngine.pause(); await releaseWakeLock(); } else if (snap.status === "paused") { await TournamentTimerEngine.resume(); await requestWakeLock(); } renderLive(TournamentTimerEngine.getSnapshot()); } catch (error) { $("liveRecoveryNote").textContent = error.message; }
       });
       $("btnCancelTimer").addEventListener("click", async () => {
         if (!confirm("Cancel this tournament timer? Your settings will be retained.")) return;
-        await TournamentTimerEngine.cancel(); await releaseWakeLock(); $("timerLivePanel").hidden = true; $("timerIdlePanel").hidden = false; renderLive(TournamentTimerEngine.getSnapshot());
+        await TournamentTimerEngine.cancel();
+        await releaseWakeLock();
+        $("timerLivePanel").hidden = true;
+        $("timerIdlePanel").hidden = true;
+        setTimerTab("setup");
+        renderLive(TournamentTimerEngine.getSnapshot());
       });
       function formatClock(ms) { const total = Math.max(0, Math.floor(ms / 1000)); return `${String(Math.floor(total/60)).padStart(2,"0")}:${String(total%60).padStart(2,"0")}`; }
       function renderLive(snap) {
@@ -3289,7 +3302,17 @@
       TournamentTimerEngine.subscribe(renderLive);
       uiHeartbeat = setInterval(async () => { await TournamentTimerEngine.tick(); const snap = TournamentTimerEngine.getSnapshot(); if (snap.status === "completed") releaseWakeLock(); renderLive(snap); }, 500);
       const restored = TournamentTimerEngine.getSnapshot();
-      if (["running", "paused", "completed"].includes(restored.status)) { $("timerIdlePanel").hidden = true; $("timerLivePanel").hidden = false; renderLive(restored); if (restored.status === "running") requestWakeLock(); }
+      if (["running", "paused", "completed"].includes(restored.status)) {
+        $("timerIdlePanel").hidden = restored.status !== "completed";
+        $("timerLivePanel").hidden = false;
+        setTimerTab("live");
+        renderLive(restored);
+        if (restored.status === "running") requestWakeLock();
+      } else {
+        $("timerIdlePanel").hidden = true;
+        $("timerLivePanel").hidden = true;
+        setTimerTab("setup");
+      }
       window.addEventListener("pagehide", () => { /* Timestamp state persists; do not depend on this handler running. */ });
     })();
 
@@ -3327,3 +3350,7 @@
   </script>
 </body>
 </html>
+
+
+
+
