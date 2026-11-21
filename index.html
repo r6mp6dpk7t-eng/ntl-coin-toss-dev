@@ -1882,14 +1882,19 @@
         return events;
       }
 
-      function playEvent(event) {
-        const task = playbackQueue.then(() => playEventNow(event));
+      function playEvent(event, options = {}) {
+        const task = playbackQueue.then(() => playEventNow(event, options));
         playbackQueue = task.catch(() => false);
         return task;
       }
 
-      async function playEventNow(event) {
-        if (!enabled || !unlocked || fired.has(event.id)) return false;
+      async function playEventNow(event, options = {}) {
+        // Sound Check is deliberately independent of live tournament audio.
+        // It may play while the live controller is disabled, without changing
+        // the live enabled state or the tournament configuration.
+        if ((!enabled && !options.allowWhenDisabled) || !unlocked || fired.has(event.id)) {
+          return { ok: false, error: !unlocked ? "Audio is not unlocked by a user gesture." : (!enabled && !options.allowWhenDisabled ? "Live tournament audio is disabled." : "This audio event has already been played.") };
+        }
 
         ensureAudio();
         const audio = sharedAudioElement;
@@ -2082,9 +2087,10 @@
             const checkEvent = { ...event, id: `sound-check-${runId}:${event.clip}:${i}` };
             // First clip starts immediately in the click call stack. Later
             // clips use the same persistent media element and serial queue.
+            const checkPlaybackOptions = { allowWhenDisabled: true };
             const result = i === 0
-              ? playEventNow(checkEvent)
-              : playEvent(checkEvent);
+              ? playEventNow(checkEvent, checkPlaybackOptions)
+              : playEvent(checkEvent, checkPlaybackOptions);
             const playback = await result;
             const ok = playback === true;
             record(ok ? "pass" : "fail", ok
