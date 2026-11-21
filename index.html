@@ -1658,6 +1658,7 @@
       const AUDIO_PATHS = {
         warning60: "audio/warning-60.mp3",
         fieldCall: "audio/field-of-play.mp3",
+        warningBeeps: "audio/warning-beeps.mp3",
         warning30: "audio/warning-30.mp3",
         standby: "audio/standby.mp3",
         hooter: "audio/hooter.mp3"
@@ -1665,6 +1666,7 @@
 
       const FIRED_KEY = "ntlTournamentAudioFiredV2";
       const WARNING_60_CLIP_MS = 3474;
+      const WARNING_BEEPS_CLIP_MS = 2420;
       const WARNING_60_LEAD_MS = 60000;
       const LATE_EVENT_LIMIT_MS = 2500;
 
@@ -1841,8 +1843,13 @@
                 clip: "fieldCall"
               },
               {
-                id: `${token}:warning30`,
+                id: `${token}:warningBeeps`,
                 at: playStartAt - 30000,
+                clip: "warningBeeps"
+              },
+              {
+                id: `${token}:warning30`,
+                at: playStartAt - 30000 + WARNING_BEEPS_CLIP_MS,
                 clip: "warning30"
               },
               {
@@ -2031,7 +2038,7 @@
       }
 
       function getClipLabel(clip) {
-        return ({ warning60: "60-second warning", fieldCall: "Field-of-play call", warning30: "30-second warning", standby: "Standby", hooter: "Hooter" })[clip] || clip;
+        return ({ warning60: "60-second warning", fieldCall: "Field-of-play call", warningBeeps: "Five warning beeps", warning30: "30-second announcement", standby: "Standby", hooter: "Hooter" })[clip] || clip;
       }
 
       async function runSoundCheck(kind = "full", audioMode = "announced", onUpdate = () => {}) {
@@ -2065,7 +2072,7 @@
           // The same production scheduler creates this event list. For the
           // operational check, preserve its order but compress the gaps.
           const ordered = events.slice().sort((a,b) => a.at - b.at);
-          if (kind === "full" && mode === "announced" && ordered.length !== 5) throw new Error("The announced sequence did not produce all five expected events.");
+          if (kind === "full" && mode === "announced" && ordered.length !== 6) throw new Error("The announced sequence did not produce all five expected events.");
           if (kind === "full" && mode === "hooters-only" && ordered.length !== 1) throw new Error("Hooters Only should produce one start hooter.");
           record("info", `${kind === "hooter" ? "Hooter-only check" : "Quick sound check"} started (${mode === "announced" ? "Announced Fixtures" : "Hooters Only"}).`);
           for (let i = 0; i < ordered.length; i++) {
@@ -2110,7 +2117,7 @@
           game: { id: "validation-game", halves: 2 }, phase: { type: "half-time" },
           phaseStartedAt: target - 120000, phaseEndsAt: target };
         const secondHalf = scheduleFor(snapshot).sort((a,b) => a.at - b.at);
-        const expectedAnnounced = ["warning60", "fieldCall", "warning30", "standby", "hooter"];
+        const expectedAnnounced = ["warning60", "fieldCall", "warningBeeps", "warning30", "standby", "hooter"];
         const expectedHooters = ["hooter"];
         const expected = mode === "announced" ? expectedAnnounced : expectedHooters;
         const secondHalfOrder = secondHalf.map(e => e.clip);
@@ -2121,7 +2128,8 @@
           const byClip = Object.fromEntries(secondHalf.map(e => [e.clip, e.at]));
           check("60-second warning offset", byClip.warning60 === target - 63474, "Starts 63.474 seconds before play; includes the recorded clip lead-in.");
           check("Field-of-play call offset", byClip.fieldCall === target - 57000, "Starts 57 seconds before play.");
-          check("30-second warning offset", byClip.warning30 === target - 30000, "Starts 30 seconds before play.");
+          check("Five warning beeps offset", byClip.warningBeeps === target - 30000, "Starts 30 seconds before play.");
+          check("30-second spoken announcement offset", byClip.warning30 === target - 27580, "Starts immediately after the 2.42-second five-beep file.");
           check("Standby offset", byClip.standby === target - 10000, "Starts 10 seconds before play.");
         }
         const firstHalfEnd = scheduleFor({ ...snapshot, phase: { type: "half-1" }, phaseEndsAt: target - 120000, phaseStartedAt: target - 240000 });
