@@ -1733,7 +1733,17 @@
         // Call from a direct user interaction. iOS Safari requires this
         // gesture before it will allow later scheduled audio playback.
         ensureAudio();
-        const element = audioElements.hooter || new Audio();
+        const element = audioElements.hooter || sharedAudioElement || new Audio();
+        // A media element with no source cannot be unlocked reliably. Load the
+        // real hooter asset first, then perform the muted play inside the
+        // organiser's direct click/tap gesture.
+        try {
+          const unlockSource = new URL(AUDIO_PATHS.hooter, document.baseURI).href;
+          if (element.src !== unlockSource) {
+            element.src = unlockSource;
+            element.load();
+          }
+        } catch (_) {}
         const wasMuted = element.muted;
         const previousVolume = element.volume;
 
@@ -3249,6 +3259,10 @@
       async function startTournament() {
         if (!saveSettings(false)) return;
         completedDismissed = false;
+        // Explicitly unlock live tournament audio from this Start button's
+        // user gesture. The controller's first-click listener is only a
+        // fallback; scheduled playback must not depend on it succeeding.
+        const audioUnlockPromise = TournamentAudioController.unlock();
         const v = readSettings();
         if (!["idle", "completed"].includes(TournamentTimerEngine.getSnapshot().status)) { $("setupValidation").textContent = "Cancel the current timer before starting a new tournament."; return; }
         const games = Array.from({length:v.slots}, (_, i) => ({
@@ -3258,6 +3272,10 @@
           preGameWarningSeconds: 65, resultRequired: false
         }));
         try {
+          const audioUnlocked = await audioUnlockPromise;
+          if (!audioUnlocked) {
+            console.warn("Live tournament audio could not be unlocked from the Start button gesture. Check browser audio permissions.");
+          }
           await TournamentTimerEngine.configure(games, {audioMode:v.audioMode, scheduleMode:"sequential"});
           await TournamentTimerEngine.start();
           await requestWakeLock();
@@ -3332,17 +3350,11 @@
         $("liveControlRow").hidden = completed;
         $("liveCompletionActions").hidden = !completed;
         const showCompleted = completed && !completedDismissed;
-        $("timerIdlePanel").hidden = running || paused || completed;
+        // When completion has been dismissed, keep the ready/summary panel
+        // available on the Timer tab. Do not let the heartbeat hide or show
+        // the separate Set-up form; tab navigation owns that visibility.
+        $("timerIdlePanel").hidden = running || paused || (completed && !completedDismissed);
         $("timerLivePanel").hidden = !(running || paused || showCompleted);
-        if (completedDismissed && completed) {
-          // The organiser has closed the completed screen and is preparing
-          // another tournament. Keep the Timer tab's ready/summary panel
-          // visible; showing the setup form inside its hidden parent creates
-          // a blank screen after Confirm settings.
-          $("timerSetupPanel").hidden = true;
-          $("timerIdlePanel").hidden = false;
-          $("timerLivePanel").hidden = true;
-        }
         renderHistory(snap);
       }
       function renderHistory(snap) {
