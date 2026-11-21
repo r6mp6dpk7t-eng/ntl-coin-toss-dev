@@ -3262,11 +3262,10 @@
           // timer summary after cancellation.
           $("timerLivePanel").hidden = true;
           $("timerIdlePanel").hidden = true;
+          $("timerSetupPanel").hidden = false;
           $("timerLiveTab").hidden = true;
           $("timerSetupTab").hidden = false;
-          document.querySelectorAll("[data-timer-tab]").forEach(button => {
-            button.classList.toggle("active", button.dataset.timerTab === "setup");
-          });
+          setTimerTab("setup");
           saveSettings(false);
         } catch (error) {
           $("liveRecoveryNote").textContent = `Could not cancel timer: ${error.message}`;
