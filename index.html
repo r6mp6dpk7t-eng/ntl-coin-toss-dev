@@ -1666,7 +1666,6 @@
 
       const FIRED_KEY = "ntlTournamentAudioFiredV2";
       const WARNING_60_CLIP_MS = 3474;
-      const WARNING_BEEPS_CLIP_MS = 2420;
       const WARNING_60_LEAD_MS = 60000;
       const LATE_EVENT_LIMIT_MS = 2500;
 
@@ -1849,7 +1848,7 @@
               },
               {
                 id: `${token}:warning30`,
-                at: playStartAt - 30000 + WARNING_BEEPS_CLIP_MS,
+                at: playStartAt - 30000,
                 clip: "warning30"
               },
               {
@@ -1882,19 +1881,14 @@
         return events;
       }
 
-      function playEvent(event, options = {}) {
-        const task = playbackQueue.then(() => playEventNow(event, options));
+      function playEvent(event) {
+        const task = playbackQueue.then(() => playEventNow(event));
         playbackQueue = task.catch(() => false);
         return task;
       }
 
-      async function playEventNow(event, options = {}) {
-        // Sound Check is deliberately independent of live tournament audio.
-        // It may play while the live controller is disabled, without changing
-        // the live enabled state or the tournament configuration.
-        if ((!enabled && !options.allowWhenDisabled) || !unlocked || fired.has(event.id)) {
-          return { ok: false, error: !unlocked ? "Audio is not unlocked by a user gesture." : (!enabled && !options.allowWhenDisabled ? "Live tournament audio is disabled." : "This audio event has already been played.") };
-        }
+      async function playEventNow(event) {
+        if (!enabled || !unlocked || fired.has(event.id)) return false;
 
         ensureAudio();
         const audio = sharedAudioElement;
@@ -2057,47 +2051,53 @@
           soundCheckLog.push(item);
           try { onUpdate({ running: soundCheckBusy, log: [...soundCheckLog], item }); } catch (_) {}
         };
-        try {
-          ensureAudio();
-          // The first audible play() must happen in the original tap gesture.
-          // Do not await a muted unlock attempt first: iOS Safari can discard
-          // user activation across that asynchronous boundary.
-          unlocked = true;
-          const mode = audioMode === "hooters-only" ? "hooters-only" : "announced";
-          const base = Date.now() + 1000;
-          const mock = {
-            status: "running", audioMode: mode, gameIndex: 0,
-            game: { id: `sound-check-${runId}`, halves: 2 },
-            phase: { type: mode === "announced" ? "pre-game-warning" : "half-1" },
-            phaseStartedAt: mode === "announced" ? base - 65000 : base,
-            phaseEndsAt: base
+        const waitForClip = (audio, clip) => new Promise(async (resolve, reject) => {
+          let settled = false;
+          const finish = (error) => {
+            if (settled) return;
+            settled = true;
+            audio.removeEventListener("ended", onEnded);
+            audio.removeEventListener("error", onError);
+            audio.removeEventListener("pause", onPause);
+            clearTimeout(fallback);
+            error ? reject(error) : resolve();
           };
-          let events = scheduleFor(mock);
-          if (kind === "hooter") events = [{ id: `sound-check-${runId}:hooter`, at: base, clip: "hooter" }];
-          // The same production scheduler creates this event list. For the
-          // operational check, preserve its order but compress the gaps.
-          const ordered = events.slice().sort((a,b) => a.at - b.at);
-          if (kind === "full" && mode === "announced" && ordered.length !== 6) throw new Error("The announced sequence did not produce all five expected events.");
-          if (kind === "full" && mode === "hooters-only" && ordered.length !== 1) throw new Error("Hooters Only should produce one start hooter.");
+          const onEnded = () => finish();
+          const onError = () => finish(new Error(`The ${clip} audio file could not be loaded or decoded.`));
+          const onPause = () => { if (soundCheckAbort) finish(new Error("Sound Check stopped by organiser.")); };
+          const fallback = setTimeout(() => finish(new Error(`The ${clip} audio file did not finish playing.`)), 15000);
+          audio.addEventListener("ended", onEnded, { once: true });
+          audio.addEventListener("error", onError, { once: true });
+          audio.addEventListener("pause", onPause);
+          try {
+            audio.src = new URL(AUDIO_PATHS[clip], document.baseURI).href;
+            audio.load();
+            audio.currentTime = 0;
+            await audio.play();
+          } catch (error) { finish(error); }
+        });
+        try {
+          // Sound Check owns a separate media element. It does not use the
+          // live controller queue, fired-event IDs, or persistent history.
+          soundCheckAudio = new Audio();
+          soundCheckAudio.preload = "auto";
+          const mode = audioMode === "hooters-only" ? "hooters-only" : "announced";
+          const clips = kind === "hooter"
+            ? ["hooter"]
+            : mode === "announced"
+              ? ["warning60", "fieldCall", "warningBeeps", "warning30", "standby", "hooter"]
+              : ["hooter"];
           record("info", `${kind === "hooter" ? "Hooter-only check" : "Quick sound check"} started (${mode === "announced" ? "Announced Fixtures" : "Hooters Only"}).`);
-          for (let i = 0; i < ordered.length; i++) {
-            if (soundCheckAbort || runId !== soundCheckRunId) { record("stopped", "Test stopped by organiser."); return { passed: false, stopped: true, log: [...soundCheckLog] }; }
-            const event = ordered[i];
-            record("playing", getClipLabel(event.clip));
-            const checkEvent = { ...event, id: `sound-check-${runId}:${event.clip}:${i}` };
-            // First clip starts immediately in the click call stack. Later
-            // clips use the same persistent media element and serial queue.
-            const checkPlaybackOptions = { allowWhenDisabled: true };
-            const result = i === 0
-              ? playEventNow(checkEvent, checkPlaybackOptions)
-              : playEvent(checkEvent, checkPlaybackOptions);
-            const playback = await result;
-            const ok = playback === true;
-            record(ok ? "pass" : "fail", ok
-              ? `${getClipLabel(event.clip)} playback completed.`
-              : `${getClipLabel(event.clip)} playback failed: ${playback?.error || "unknown playback error"}.`);
-            if (!ok) throw new Error(`Playback failed: ${getClipLabel(event.clip)} — ${playback?.error || "unknown playback error"}`);
-            if (i < ordered.length - 1) await new Promise(resolve => setTimeout(resolve, kind === "hooter" ? 0 : 650));
+          for (let i = 0; i < clips.length; i++) {
+            if (soundCheckAbort || runId !== soundCheckRunId) {
+              record("stopped", "Test stopped by organiser.");
+              return { passed: false, stopped: true, log: [...soundCheckLog] };
+            }
+            const clip = clips[i];
+            record("playing", getClipLabel(clip));
+            await waitForClip(soundCheckAudio, clip);
+            record("pass", `${getClipLabel(clip)} playback completed.`);
+            if (i < clips.length - 1) await new Promise(resolve => setTimeout(resolve, 450));
           }
           record("pass", "Sound Check completed. Confirm the sound is audible at the required volume.");
           return { passed: true, log: [...soundCheckLog] };
@@ -2105,14 +2105,20 @@
           record("fail", error.message || "Sound Check failed.");
           return { passed: false, error: error.message, log: [...soundCheckLog] };
         } finally {
-          if (runId === soundCheckRunId) { soundCheckBusy = false; soundCheckAbort = false; }
+          if (runId === soundCheckRunId) {
+            soundCheckBusy = false;
+            soundCheckAbort = false;
+            soundCheckAudio = null;
+          }
           try { onUpdate({ running: soundCheckBusy, log: [...soundCheckLog], complete: true }); } catch (_) {}
         }
       }
 
       function stopSoundCheck() {
         soundCheckAbort = true;
-        if (sharedAudioElement) { try { sharedAudioElement.pause(); sharedAudioElement.currentTime = 0; } catch (_) {} }
+        if (soundCheckAudio) {
+          try { soundCheckAudio.pause(); soundCheckAudio.currentTime = 0; } catch (_) {}
+        }
         return { stopped: true };
       }
 
@@ -2134,8 +2140,8 @@
           const byClip = Object.fromEntries(secondHalf.map(e => [e.clip, e.at]));
           check("60-second warning offset", byClip.warning60 === target - 63474, "Starts 63.474 seconds before play; includes the recorded clip lead-in.");
           check("Field-of-play call offset", byClip.fieldCall === target - 57000, "Starts 57 seconds before play.");
-          check("Five warning beeps offset", byClip.warningBeeps === target - 30000, "Starts 30 seconds before play.");
-          check("30-second spoken announcement offset", byClip.warning30 === target - 27580, "Starts immediately after the 2.42-second five-beep file.");
+          check("Five warning beeps offset", byClip.warningBeeps === target - 30000, "Beep file is queued at the 30-second warning point, before the spoken announcement.");
+          check("30-second warning offset", byClip.warning30 === target - 30000, "Starts 30 seconds before play.");
           check("Standby offset", byClip.standby === target - 10000, "Starts 10 seconds before play.");
         }
         const firstHalfEnd = scheduleFor({ ...snapshot, phase: { type: "half-1" }, phaseEndsAt: target - 120000, phaseStartedAt: target - 240000 });
@@ -3114,13 +3120,16 @@
       const setBusy = busy => { fullBtn.disabled = hooterBtn.disabled = validateBtn.disabled = busy; stopBtn.disabled = !busy; };
       const run = async kind => {
         setBusy(true); statusEl.textContent = "Preparing audio…"; reportEl.textContent = "Starting test…";
-        await controller.runSoundCheck(kind, modeEl.value, update => {
-          renderLog(update.log || []);
-          if (update.item) statusEl.textContent = update.item.detail;
-        });
-        const last = controller.getStatus();
-        statusEl.textContent = "Test finished. Check the report and confirm the speaker is audible.";
-        setBusy(false);
+        try {
+          const result = await controller.runSoundCheck(kind, modeEl.value, update => {
+            renderLog(update.log || []);
+            if (update.item) statusEl.textContent = update.item.detail;
+          });
+          statusEl.textContent = result?.passed ? "Test finished. Confirm the speaker is audible." : result?.stopped ? "Sound Check stopped." : "Sound Check failed. See the report.";
+        } catch (error) {
+          statusEl.textContent = `Sound Check failed: ${error.message}`;
+          reportEl.textContent = error.message;
+        } finally { setBusy(false); }
       };
       fullBtn.addEventListener("click", () => run("full"));
       hooterBtn.addEventListener("click", () => run("hooter"));
@@ -3144,6 +3153,7 @@
       let lastSnapshot = TournamentTimerEngine.getSnapshot();
       let wakeLock = null;
       let uiHeartbeat = null;
+      let completedDismissed = false;
       const readSettings = () => ({
         halves: Number($("setupHalves").value), duration: Number($("setupDuration").value),
         halfTime: Number($("setupHalfTime").value) * 60, interval: Number($("setupInterval").value) * 60,
@@ -3238,6 +3248,7 @@
       });
       async function startTournament() {
         if (!saveSettings(false)) return;
+        completedDismissed = false;
         const v = readSettings();
         if (!["idle", "completed"].includes(TournamentTimerEngine.getSnapshot().status)) { $("setupValidation").textContent = "Cancel the current timer before starting a new tournament."; return; }
         const games = Array.from({length:v.slots}, (_, i) => ({
@@ -3250,6 +3261,9 @@
           await TournamentTimerEngine.configure(games, {audioMode:v.audioMode, scheduleMode:"sequential"});
           await TournamentTimerEngine.start();
           await requestWakeLock();
+          completedDismissed = false;
+          $("timerSetupPanel").hidden = true;
+          $("timerIdlePanel").hidden = true;
           setTimerTab("live");
           $("timerSetupPanel").hidden = true; $("timerLivePanel").hidden = false;
           renderLive(TournamentTimerEngine.getSnapshot());
@@ -3258,9 +3272,11 @@
       $("btnStartTournamentLive").addEventListener("click", startTournament);
       $("btnOpenTimerSettings").addEventListener("click", () => setTimerTab("setup"));
       $("btnCloseCompleted").addEventListener("click", () => {
+        completedDismissed = true;
         $("timerLivePanel").hidden = true;
-        $("timerIdlePanel").hidden = false;
-        setTimerTab("live");
+        $("timerIdlePanel").hidden = true;
+        $("timerSetupPanel").hidden = false;
+        setTimerTab("setup");
         renderSetupSummary();
       });
       $("btnPauseResume").addEventListener("click", async () => {
@@ -3315,8 +3331,13 @@
         $("btnCancelTimer").disabled = snap.status === "idle" || completed;
         $("liveControlRow").hidden = completed;
         $("liveCompletionActions").hidden = !completed;
+        const showCompleted = completed && !completedDismissed;
         $("timerIdlePanel").hidden = running || paused || completed;
-        $("timerLivePanel").hidden = !(running || paused || snap.status === "completed");
+        $("timerLivePanel").hidden = !(running || paused || showCompleted);
+        if (completedDismissed && completed) {
+          $("timerSetupPanel").hidden = false;
+          $("timerIdlePanel").hidden = true;
+        }
         renderHistory(snap);
       }
       function renderHistory(snap) {
