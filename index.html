@@ -3335,8 +3335,13 @@
         $("timerIdlePanel").hidden = running || paused || completed;
         $("timerLivePanel").hidden = !(running || paused || showCompleted);
         if (completedDismissed && completed) {
-          $("timerSetupPanel").hidden = false;
-          $("timerIdlePanel").hidden = true;
+          // The organiser has closed the completed screen and is preparing
+          // another tournament. Keep the Timer tab's ready/summary panel
+          // visible; showing the setup form inside its hidden parent creates
+          // a blank screen after Confirm settings.
+          $("timerSetupPanel").hidden = true;
+          $("timerIdlePanel").hidden = false;
+          $("timerLivePanel").hidden = true;
         }
         renderHistory(snap);
       }
