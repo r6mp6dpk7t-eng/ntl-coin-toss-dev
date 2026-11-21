@@ -1509,34 +1509,32 @@
         }
       }
 
+      // Use ONE persistent HTMLAudioElement for every clip. iOS Safari can
+      // reject playback when a different Audio element is created and played
+      // later outside the original user gesture. Reusing the same element
+      // keeps the playback permission associated with the organiser's tap.
+      let sharedAudioElement = null;
+
       function configure(paths = {}) {
         Object.keys(AUDIO_PATHS).forEach(key => {
           if (typeof paths[key] === "string" && paths[key].trim()) {
             AUDIO_PATHS[key] = paths[key].trim();
           }
         });
-
-        Object.keys(AUDIO_PATHS).forEach(key => {
-          if (audioElements[key]) {
-            audioElements[key].pause();
-            audioElements[key].src = AUDIO_PATHS[key];
-            audioElements[key].load();
-          }
-        });
-
+        if (sharedAudioElement) {
+          try { sharedAudioElement.pause(); sharedAudioElement.src = AUDIO_PATHS.hooter; sharedAudioElement.load(); } catch (_) {}
+        }
         return getStatus();
       }
 
       function ensureAudio() {
         if (typeof Audio === "undefined") return;
-
-        Object.keys(AUDIO_PATHS).forEach(key => {
-          if (!audioElements[key]) {
-            const audio = new Audio(AUDIO_PATHS[key]);
-            audio.preload = "auto";
-            audioElements[key] = audio;
-          }
-        });
+        if (!sharedAudioElement) {
+          sharedAudioElement = new Audio();
+          sharedAudioElement.preload = "auto";
+          sharedAudioElement.playsInline = true;
+        }
+        Object.keys(AUDIO_PATHS).forEach(key => { audioElements[key] = sharedAudioElement; });
       }
 
       function unlock() {
@@ -1696,12 +1694,19 @@
         if (!enabled || !unlocked || fired.has(event.id)) return false;
 
         ensureAudio();
-        const audio = audioElements[event.clip];
-        if (!audio) return false;
+        const audio = sharedAudioElement;
+        if (!audio || !AUDIO_PATHS[event.clip]) return false;
 
         try {
           audio.pause();
-          audio.currentTime = 0;
+          const nextSource = new URL(AUDIO_PATHS[event.clip], document.baseURI).href;
+          if (audio.src !== nextSource) {
+            audio.src = nextSource;
+            audio.load();
+          }
+          try { audio.currentTime = 0; } catch (_) {}
+          // This function is deliberately called synchronously for the first
+          // Sound Check clip from the button handler, before any await/queue.
           await audio.play();
           // Do not start another clip until this one has finished. The
           // fallback prevents a missing ended event from blocking the queue.
@@ -1717,8 +1722,9 @@
         } catch (error) {
           fired.add(event.id);
           persistFired();
-          console.warn(`Tournament audio playback failed (${event.clip}):`, error);
-          return false;
+          const detail = `${error?.name || "PlaybackError"}: ${error?.message || String(error)}`;
+          console.warn(`Tournament audio playback failed (${event.clip}): ${detail}`, error);
+          return { ok: false, error: detail };
         }
       }
 
@@ -1815,9 +1821,7 @@
         if (unsubscribe) unsubscribe();
         unsubscribe = null;
 
-        Object.values(audioElements).forEach(audio => {
-          try { audio.pause(); } catch (_) {}
-        });
+        if (sharedAudioElement) { try { sharedAudioElement.pause(); } catch (_) {} }
 
         return getStatus();
       }
@@ -1851,9 +1855,11 @@
           try { onUpdate({ running: soundCheckBusy, log: [...soundCheckLog], item }); } catch (_) {}
         };
         try {
-          const unlockedNow = await unlock();
-          if (!unlockedNow) throw new Error("Audio could not be unlocked. Tap the test button again and allow audio playback.");
           ensureAudio();
+          // The first audible play() must happen in the original tap gesture.
+          // Do not await a muted unlock attempt first: iOS Safari can discard
+          // user activation across that asynchronous boundary.
+          unlocked = true;
           const mode = audioMode === "hooters-only" ? "hooters-only" : "announced";
           const base = Date.now() + 1000;
           const mock = {
@@ -1875,9 +1881,18 @@
             if (soundCheckAbort || runId !== soundCheckRunId) { record("stopped", "Test stopped by organiser."); return { passed: false, stopped: true, log: [...soundCheckLog] }; }
             const event = ordered[i];
             record("playing", getClipLabel(event.clip));
-            const ok = await playEvent({ ...event, id: `sound-check-${runId}:${event.clip}:${i}` });
-            record(ok ? "pass" : "fail", `${getClipLabel(event.clip)} ${ok ? "playback completed" : "playback failed"}.`);
-            if (!ok) throw new Error(`Playback failed: ${getClipLabel(event.clip)}.`);
+            const checkEvent = { ...event, id: `sound-check-${runId}:${event.clip}:${i}` };
+            // First clip starts immediately in the click call stack. Later
+            // clips use the same persistent media element and serial queue.
+            const result = i === 0
+              ? playEventNow(checkEvent)
+              : playEvent(checkEvent);
+            const playback = await result;
+            const ok = playback === true;
+            record(ok ? "pass" : "fail", ok
+              ? `${getClipLabel(event.clip)} playback completed.`
+              : `${getClipLabel(event.clip)} playback failed: ${playback?.error || "unknown playback error"}.`);
+            if (!ok) throw new Error(`Playback failed: ${getClipLabel(event.clip)} — ${playback?.error || "unknown playback error"}`);
             if (i < ordered.length - 1) await new Promise(resolve => setTimeout(resolve, kind === "hooter" ? 0 : 650));
           }
           record("pass", "Sound Check completed. Confirm the sound is audible at the required volume.");
@@ -1893,7 +1908,7 @@
 
       function stopSoundCheck() {
         soundCheckAbort = true;
-        Object.values(audioElements).forEach(audio => { try { audio.pause(); audio.currentTime = 0; } catch (_) {} });
+        if (sharedAudioElement) { try { sharedAudioElement.pause(); sharedAudioElement.currentTime = 0; } catch (_) {} }
         return { stopped: true };
       }
 
