@@ -1,3 +1,8 @@
+
+
+
+
+
 <!DOCTYPE html>
 <html lang="en-GB">
 <head>
@@ -1070,7 +1075,8 @@
             <div id="liveClockCaption" class="small muted" style="margin-top:8px">ELAPSED PLAYING TIME</div>
           </div>
           <div style="border-top:1px solid var(--border,#ddd);padding-top:14px;display:flex;justify-content:space-between;align-items:center;gap:12px"><div><div class="small muted">NEXT FIXTURE TIME SLOT</div><strong id="liveNextSlot">—</strong></div><div id="liveNextCountdown" style="font-size:1.5rem;font-weight:750;font-variant-numeric:tabular-nums">—</div></div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-primary" id="btnPauseResume">Pause</button><button type="button" class="btn-outline" id="btnCancelTimer">Cancel timer</button></div>
+          <div id="liveControlRow" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-primary" id="btnPauseResume">Pause</button><button type="button" class="btn-outline" id="btnCancelTimer">Cancel timer</button></div>
+          <div id="liveCompletionActions" hidden style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-primary" id="btnRunAgain">Run same tournament again</button><button type="button" class="btn-outline" id="btnNewTournamentSetup">Set up next tournament</button></div>
           <p class="small muted" id="liveRecoveryNote" style="margin-top:12px">Timer state is timestamp-driven and will recover when you return to the app. Browser background audio depends on device and browser support.</p>
         </div>
       </section>
@@ -3237,6 +3243,8 @@
       }
       $("btnStartTournament").addEventListener("click", startTournament);
       $("btnStartTournamentLive").addEventListener("click", startTournament);
+      $("btnRunAgain").addEventListener("click", startTournament);
+      $("btnNewTournamentSetup").addEventListener("click", () => setTimerTab("setup"));
       $("btnOpenTimerSettings").addEventListener("click", () => setTimerTab("setup"));
       $("btnPauseResume").addEventListener("click", async () => {
         try { const snap = TournamentTimerEngine.getSnapshot(); if (snap.status === "running") { await TournamentTimerEngine.pause(); await releaseWakeLock(); } else if (snap.status === "paused") { await TournamentTimerEngine.resume(); await requestWakeLock(); } renderLive(TournamentTimerEngine.getSnapshot()); } catch (error) { $("liveRecoveryNote").textContent = error.message; }
@@ -3254,13 +3262,14 @@
         const phase = snap.phase?.type || "idle";
         const elapsedPhases = ["half-1", "half-2"].includes(phase);
         const label = ({"half-1":"FIRST HALF", "half-2":"SECOND HALF", "half-time":"HALF TIME", "between-games":"INTERVAL", "pre-game-warning":"PRE-MATCH WARNING", "scheduled-wait":"WAITING TO START", "result-interval":"RESULT INTERVAL", "extra-time":"EXTRA TIME", "result-required-interval":"INTERVAL", "idle":"READY"})[phase] || (snap.status === "completed" ? "TOURNAMENT COMPLETE" : phase.toUpperCase());
-        $("livePhase").textContent = snap.status === "completed" ? "TOURNAMENT COMPLETE" : label;
-        const clockMs = elapsedPhases ? snap.elapsedMs : snap.remainingMs;
+        const completed = snap.status === "completed";
+        $("livePhase").textContent = completed ? "TOURNAMENT COMPLETE" : label;
+        const clockMs = completed ? 0 : (elapsedPhases ? snap.elapsedMs : snap.remainingMs);
         $("liveClock").textContent = formatClock(clockMs);
-        $("liveClockCaption").textContent = elapsedPhases ? "ELAPSED PLAYING TIME" : (phase === "half-time" ? "TIME UNTIL SECOND HALF" : phase.includes("interval") || phase === "between-games" ? "TIME UNTIL NEXT FIXTURE SLOT" : "TIME REMAINING");
+        $("liveClockCaption").textContent = completed ? "TOURNAMENT FINISHED" : (elapsedPhases ? "ELAPSED PLAYING TIME" : (phase === "half-time" ? "TIME UNTIL SECOND HALF" : phase.includes("interval") || phase === "between-games" ? "TIME UNTIL NEXT FIXTURE SLOT" : "TIME REMAINING"));
         const nextIndex = snap.gameIndex + 1;
-        $("liveNextSlot").textContent = nextIndex < snap.gameCount ? `FIXTURE TIME SLOT ${nextIndex+1}` : "FINAL FIXTURE SLOT";
-        if (nextIndex < snap.gameCount) {
+        $("liveNextSlot").textContent = completed ? "NO FURTHER FIXTURES" : (nextIndex < snap.gameCount ? `FIXTURE TIME SLOT ${nextIndex+1}` : "FINAL FIXTURE SLOT");
+        if (!completed && nextIndex < snap.gameCount) {
           const game = snap.game || {};
           let remainingToNext = snap.remainingMs;
           if (phase === "pre-game-warning") remainingToNext += (game.halves === 2 ? game.halfDurationSeconds * 2 + game.halfTimeSeconds : game.halfDurationSeconds) * 1000 + (game.intervalAfterSeconds || 0) * 1000;
@@ -3271,8 +3280,10 @@
         } else $("liveNextCountdown").textContent = "—";
         $("btnPauseResume").textContent = paused ? "Resume" : "Pause";
         $("btnPauseResume").disabled = !running && !paused;
-        $("btnCancelTimer").disabled = snap.status === "idle" || snap.status === "completed";
-        $("timerIdlePanel").hidden = running || paused || snap.status === "completed";
+        $("btnCancelTimer").disabled = snap.status === "idle" || completed;
+        $("liveControlRow").hidden = completed;
+        $("liveCompletionActions").hidden = !completed;
+        $("timerIdlePanel").hidden = running || paused || completed;
         $("timerLivePanel").hidden = !(running || paused || snap.status === "completed");
         renderHistory(snap);
       }
@@ -3321,7 +3332,3 @@
   </script>
 </body>
 </html>
-
-
-
-
