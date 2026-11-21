@@ -1151,6 +1151,7 @@
         schemaVersion: 1,
         status: "idle",
         scheduleMode: "sequential",
+        audioMode: "announced",
         resultRequiredIntervalSeconds: 600,
         games: [],
         currentGameIndex: 0,
@@ -1178,13 +1179,17 @@
         state.updatedAt = event.at;
       };
 
-      function validateGame(game, index) {
+      function validateGame(game, index, audioMode = "announced") {
         if (!game || typeof game !== "object") throw new Error(`Game ${index + 1} is invalid.`);
         const halves = Number(game.halves ?? 2);
         if (![1, 2].includes(halves)) throw new Error(`Game ${index + 1}: halves must be 1 or 2.`);
         const halfDurationSeconds = seconds(game.halfDurationSeconds);
         if (!halfDurationSeconds) throw new Error(`Game ${index + 1}: half duration must be greater than zero.`);
-        if (halves === 2 && !seconds(game.halfTimeSeconds)) throw new Error(`Game ${index + 1}: half-time must be greater than zero for a two-half game.`);
+        const halfTimeSeconds = seconds(game.halfTimeSeconds);
+        if (halves === 2 && !halfTimeSeconds) throw new Error(`Game ${index + 1}: half-time must be greater than zero for a two-half game.`);
+        if (halves === 2 && audioMode === "announced" && halfTimeSeconds < 120) {
+          throw new Error(`Game ${index + 1}: Announced Fixtures requires at least 2 minutes (120 seconds) of half-time.`);
+        }
         return {
           id: String(game.id || `game-${index + 1}`),
           fixtureId: game.fixtureId == null ? null : String(game.fixtureId),
@@ -1193,7 +1198,7 @@
           mode: game.mode === "touchdown-turnaround" ? "touchdown-turnaround" : "traditional",
           halves,
           halfDurationSeconds,
-          halfTimeSeconds: halves === 2 ? seconds(game.halfTimeSeconds) : 0,
+          halfTimeSeconds: halves === 2 ? halfTimeSeconds : 0,
           intervalAfterSeconds: seconds(game.intervalAfterSeconds),
           preGameWarningSeconds: seconds(game.preGameWarningSeconds ?? 65) || 65,
           scheduledStartAt: game.scheduledStartAt == null || game.scheduledStartAt === ""
@@ -1205,7 +1210,9 @@
 
       function makePhases(game) {
         const phases = [];
-        if (game.preGameWarningSeconds > 0) phases.push({ type: "pre-game-warning", label: "Pre-game warning", durationSeconds: game.preGameWarningSeconds });
+        if (state.audioMode === "announced" && game.preGameWarningSeconds > 0) {
+          phases.push({ type: "pre-game-warning", label: "Pre-game warning", durationSeconds: game.preGameWarningSeconds });
+        }
         phases.push({ type: "half-1", label: game.halves === 1 ? "Game" : "First half", durationSeconds: game.halfDurationSeconds });
         if (game.halves === 2) {
           phases.push({ type: "half-time", label: "Half-time", durationSeconds: game.halfTimeSeconds });
@@ -1258,6 +1265,7 @@
         return {
           status: state.status,
           scheduleMode: state.scheduleMode,
+          audioMode: state.audioMode || "announced",
           resultRequiredIntervalSeconds: state.resultRequiredIntervalSeconds,
           nextScheduledStartAt: game?.scheduledStartAt ?? null,
           game: game ? clone(game) : null,
@@ -1268,6 +1276,7 @@
           remainingMs: phase ? Math.max(0, durationMs - elapsedMs) : 0,
           elapsedMs,
           phaseDurationMs: durationMs,
+          phaseStartedAt: state.phaseStartedAt,
           phaseEndsAt: state.phaseEndsAt,
           eventLog: clone(state.eventLog),
           updatedAt: state.updatedAt
@@ -1277,7 +1286,8 @@
       async function configure(games, options = {}) {
         if (state.status === "running" || state.status === "paused") throw new Error("Cancel the active timer before changing its schedule.");
         if (!Array.isArray(games) || games.length === 0) throw new Error("Add at least one game to the schedule.");
-        const validatedGames = games.map(validateGame);
+        const audioMode = options.audioMode === "hooters-only" ? "hooters-only" : "announced";
+        const validatedGames = games.map((game, index) => validateGame(game, index, audioMode));
         const scheduleMode = options.scheduleMode === "clock" ? "clock" : "sequential";
         if (scheduleMode === "clock") {
           validatedGames.forEach((game, index) => {
@@ -1293,6 +1303,7 @@
           ...state,
           status: "idle",
           scheduleMode,
+          audioMode,
           resultRequiredIntervalSeconds: seconds(options.resultRequiredIntervalSeconds ?? 600),
           games: validatedGames,
           currentGameIndex: 0,
@@ -1307,7 +1318,7 @@
           lastEvent: null
         };
         rebuildPhases();
-        log("schedule-configured", { games: state.games.length, scheduleMode: state.scheduleMode });
+        log("schedule-configured", { games: state.games.length, scheduleMode: state.scheduleMode, audioMode: state.audioMode });
         await persist(); emit();
         return getSnapshot();
       }
@@ -1416,6 +1427,7 @@
         const record = await AppPersistence.loadModuleState(STORAGE_MODULE);
         if (!record?.state || record.state.schemaVersion !== 1) return getSnapshot();
         state = record.state;
+        if (!["announced", "hooters-only"].includes(state.audioMode)) state.audioMode = "announced";
         if (state.status === "running" && state.phaseEndsAt != null) await tick();
         emit(); return getSnapshot();
       }
@@ -1428,7 +1440,7 @@
 
 
     /* =========================================================
-       TOURNAMENT AUDIO CONTROLLER — STAGE 4.2 CONSOLIDATED
+       TOURNAMENT AUDIO CONTROLLER — STAGE 4.2 AUDIO MODES
        Audio follows absolute timer timestamps. It never drives
        or changes the timer engine.
        ========================================================= */
@@ -1576,14 +1588,14 @@
         const phase = snapshot?.phase?.type;
         const game = snapshot?.game;
         const gameId = game?.id || `game-${snapshot?.gameIndex ?? 0}`;
+        const audioMode = snapshot?.audioMode === "hooters-only" ? "hooters-only" : "announced";
         const events = [];
 
         if (!Number.isFinite(snapshot?.phaseEndsAt)) return events;
 
-        // Warning sequences are scheduled against the actual start of play.
-        // The standalone 60-second sentence starts 63.474s before play:
-        // it finishes at T-60, leaving exactly three seconds before the
-        // field-of-play call at T-57.
+        // Work out the next start of play. In announced mode the warning
+        // phase/half-time phase schedules the complete sequence backwards
+        // from that absolute start timestamp.
         let playStartAt = null;
         let playPhase = null;
 
@@ -1593,42 +1605,51 @@
         } else if (phase === "half-time" && game?.halves === 2) {
           playStartAt = snapshot.phaseEndsAt;
           playPhase = "half-2";
+        } else if (audioMode === "hooters-only" && phase === "half-1") {
+          // Hooters-only mode has no pre-game warning phase. Use the actual
+          // start timestamp of the first playing half instead.
+          playStartAt = snapshot.phaseStartedAt;
+          playPhase = "half-1";
         }
 
         if (playStartAt != null) {
           const token = `${gameId}:${playPhase}:${playStartAt}`;
-          events.push(
-            {
-              id: `${token}:warning60`,
-              at: playStartAt - WARNING_60_LEAD_MS - WARNING_60_CLIP_MS,
-              clip: "warning60"
-            },
-            {
-              id: `${token}:fieldCall`,
-              at: playStartAt - 57000,
-              clip: "fieldCall"
-            },
-            {
-              id: `${token}:warning30`,
-              at: playStartAt - 30000,
-              clip: "warning30"
-            },
-            {
-              id: `${token}:standby`,
-              at: playStartAt - 10000,
-              clip: "standby"
-            },
-            {
-              id: `${token}:playHooter`,
-              at: playStartAt,
-              clip: "hooter"
-            }
-          );
+
+          if (audioMode === "announced") {
+            events.push(
+              {
+                id: `${token}:warning60`,
+                at: playStartAt - WARNING_60_LEAD_MS - WARNING_60_CLIP_MS,
+                clip: "warning60"
+              },
+              {
+                id: `${token}:fieldCall`,
+                at: playStartAt - 57000,
+                clip: "fieldCall"
+              },
+              {
+                id: `${token}:warning30`,
+                at: playStartAt - 30000,
+                clip: "warning30"
+              },
+              {
+                id: `${token}:standby`,
+                at: playStartAt - 10000,
+                clip: "standby"
+              }
+            );
+          }
+
+          // Both audio modes use the main hooter at the start of play.
+          events.push({
+            id: `${token}:playHooter`,
+            at: playStartAt,
+            clip: "hooter"
+          });
         }
 
-        // Main hooter at the end of every playing half, including a
-        // one-half game. This is queued while the half is active so it
-        // survives the engine moving into half-time/result interval.
+        // Queue the end hooter while the playing phase is still active so
+        // it is retained when the timer advances into half-time/result interval.
         if (phase === "half-1" || phase === "half-2" || phase === "extra-time") {
           const token = `${gameId}:${phase}:${snapshot.phaseEndsAt}`;
           events.push({
@@ -1667,9 +1688,9 @@
       }
 
       function processDue(snapshot) {
-        if (!active || !enabled || snapshot?.status !== "running") return;
+        if (!active || !enabled || !["running", "completed"].includes(snapshot?.status)) return;
 
-        addEvents(scheduleFor(snapshot));
+        if (snapshot.status === "running") addEvents(scheduleFor(snapshot));
 
         const currentTime = Date.now();
         const due = [...pendingEvents.values()]
@@ -1702,7 +1723,14 @@
 
         if (snapshot?.status === "running") {
           processDue(snapshot);
-        } else if (snapshot?.status === "idle" || snapshot?.status === "completed") {
+        } else if (snapshot?.status === "completed") {
+          // The final half/extra-time hooter is due at the exact instant the
+          // engine completes. Process already-queued events before clearing.
+          processDue(snapshot);
+          pendingEvents.clear();
+        } else if (snapshot?.status === "idle" || snapshot?.status === "paused") {
+          // A pause changes the phase end timestamp on resume. Discard old
+          // pending warning times; the resumed snapshot will schedule fresh IDs.
           pendingEvents.clear();
         }
       }
