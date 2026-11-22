@@ -1680,7 +1680,7 @@
       let scheduledEvents = new Map();
       let audioReady = false;
       let audioLoadError = null;
-      let unlockPromise = null;
+      let preloadPromise = null;
       let pollHandle = null;
       let unsubscribe = null;
       let lastSnapshot = null;
@@ -1718,26 +1718,45 @@
         return audioContext;
       }
 
-      async function preloadAudio() {
+      function preloadAudio() {
+        if (audioReady) return Promise.resolve(true);
+        if (preloadPromise) return preloadPromise;
+
+        // Creating/decoding the audio context does not attempt playback. It is
+        // safe to do this while the organiser is configuring the tournament.
+        // iOS playback permission is handled separately by unlock() on Start.
         const context = getAudioContext();
         audioLoadError = null;
-        const entries = Object.entries(AUDIO_PATHS);
-        try {
-          for (const [key, path] of entries) {
-            if (decodedBuffers.has(key)) continue;
-            const response = await fetch(new URL(path, document.baseURI).href, { cache: "force-cache" });
-            if (!response.ok) throw new Error(`${path} returned HTTP ${response.status}.`);
-            const bytes = await response.arrayBuffer();
-            const buffer = await context.decodeAudioData(bytes.slice(0));
-            decodedBuffers.set(key, buffer);
+        preloadPromise = (async () => {
+          try {
+            for (const [key, path] of Object.entries(AUDIO_PATHS)) {
+              if (decodedBuffers.has(key)) continue;
+              const response = await fetch(new URL(path, document.baseURI).href, { cache: "force-cache" });
+              if (!response.ok) throw new Error(`${path} returned HTTP ${response.status}.`);
+              const bytes = await response.arrayBuffer();
+              const buffer = await context.decodeAudioData(bytes.slice(0));
+              decodedBuffers.set(key, buffer);
+            }
+            audioReady = true;
+            return true;
+          } catch (error) {
+            audioReady = false;
+            audioLoadError = error?.message || String(error);
+            console.error("Tournament audio preload failed:", error);
+            throw error;
+          } finally {
+            preloadPromise = null;
           }
-          audioReady = true;
-          return true;
+        })();
+        return preloadPromise;
+      }
+
+      function preload() {
+        try {
+          return preloadAudio().then(() => getStatus());
         } catch (error) {
-          audioReady = false;
           audioLoadError = error?.message || String(error);
-          console.error("Tournament audio preload failed:", error);
-          throw error;
+          return Promise.reject(error);
         }
       }
 
@@ -1750,6 +1769,7 @@
         });
         audioReady = false;
         audioLoadError = null;
+        preloadPromise = null;
         return getStatus();
       }
 
@@ -1758,33 +1778,35 @@
       }
 
       function unlock() {
-        if (unlockPromise) return unlockPromise;
-        // Must be invoked directly from the organiser's Start/tap gesture.
-        // resume() is called synchronously before any await for iOS Safari.
+        // IMPORTANT FOR iOS: call resume() on EVERY Start-button gesture,
+        // synchronously and before returning a promise. Do not reuse an
+        // earlier unlock promise: an earlier setup-screen tap may have been
+        // unable to grant playback permission, but the Start tap can.
+        let context;
+        let resumePromise;
         try {
-          const context = getAudioContext();
-          const resumePromise = context.resume();
-          unlockPromise = (async () => {
-            try {
-              await resumePromise;
-              await preloadAudio();
-              unlocked = context.state === "running";
-              return unlocked;
-            } catch (error) {
-              unlocked = false;
-              audioLoadError = error?.message || String(error);
-              console.warn("Tournament audio could not be prepared:", error);
-              return false;
-            } finally {
-              unlockPromise = null;
-            }
-          })();
-          return unlockPromise;
+          context = getAudioContext();
+          resumePromise = context.resume();
         } catch (error) {
           unlocked = false;
           audioLoadError = error?.message || String(error);
           return Promise.resolve(false);
         }
+
+        return Promise.all([Promise.resolve(resumePromise), preloadAudio()])
+          .then(() => {
+            unlocked = context.state === "running" && audioReady;
+            if (!unlocked && !audioLoadError) {
+              audioLoadError = `Audio context is ${context.state}; it must be running before the tournament can start.`;
+            }
+            return unlocked;
+          })
+          .catch(error => {
+            unlocked = false;
+            audioLoadError = error?.message || String(error);
+            console.warn("Tournament audio could not be prepared:", error);
+            return false;
+          });
       }
 
       function installUnlockGesture() {
@@ -2196,6 +2218,7 @@
 
       return Object.freeze({
         configure,
+        preload,
         unlock,
         start,
         stop,
@@ -3280,7 +3303,8 @@
         try {
           const audioUnlocked = await audioUnlockPromise;
           if (!audioUnlocked) {
-            console.warn("Live tournament audio could not be unlocked from the Start button gesture. Check browser audio permissions.");
+            const reason = TournamentAudioController.getStatus().audioLoadError;
+            throw new Error(`Audio is not ready, so the tournament has not started. ${reason || "Please check your sound settings and try again."}`);
           }
           await TournamentTimerEngine.configure(games, {audioMode:v.audioMode, scheduleMode:"sequential"});
           await TournamentTimerEngine.start();
@@ -3402,7 +3426,14 @@
 
       // Restore timer state independently; failures must not affect Coin Toss.
       try { await TournamentTimerEngine.restore(); } catch (error) { console.warn("Unable to restore Tournament Timer state:", error); }
-      try { TournamentAudioController.start(); } catch (error) { console.warn("Tournament audio controller could not start:", error); }
+      try {
+        TournamentAudioController.start();
+        // Fetch and decode all clips while the organiser configures the event.
+        // This is deliberately separate from iOS's user-gesture unlock.
+        TournamentAudioController.preload().catch(error => {
+          console.warn("Tournament audio is not yet preloaded; Start will retry and require readiness:", error);
+        });
+      } catch (error) { console.warn("Tournament audio controller could not start:", error); }
 
       // Load fixture metadata first so saved competition/division selections can be restored.
       await loadFixtureDatabase();
