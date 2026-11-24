@@ -901,10 +901,27 @@
     .settings-section-nav button { min-height:46px; border:1px solid var(--border-color); border-radius:10px; background:var(--bg-card); color:var(--text-muted); font-weight:700; }
     .settings-section-nav button.active { background:var(--ntl-green); border-color:var(--ntl-green); color:#fff; }
     @media (max-width:600px) { body { padding-bottom:100px; } .timer-primary-tabs button { min-height:52px; } .settings-cog { flex-basis:58px; min-height:62px; } .settings-dialog { width:calc(100% - 16px); max-height:88dvh; } .settings-dialog-content { padding:10px; } }
+
+    .audio-compile-overlay { position:fixed; inset:0; z-index:1000; display:flex; align-items:center; justify-content:center; padding:20px; background:rgba(8,15,25,.82); }
+    .audio-compile-card { width:min(440px,100%); padding:26px; border-radius:18px; background:var(--bg-card); color:var(--text-main); text-align:center; box-shadow:0 20px 60px rgba(0,0,0,.35); }
+    .audio-compile-spinner { width:42px; height:42px; margin:0 auto 16px; border:4px solid var(--border-color); border-top-color:var(--ntl-green); border-radius:50%; animation:ntlSpin .8s linear infinite; }
+    @keyframes ntlSpin { to { transform:rotate(360deg); } }
+    .audio-compile-track { height:9px; margin:18px 0 10px; overflow:hidden; border-radius:20px; background:var(--bg-date); }
+    .audio-compile-track > div { height:100%; width:0; background:var(--ntl-green); transition:width .2s ease; }
   </style>
 </head>
 
 <body>
+  <div id="audioCompileOverlay" class="audio-compile-overlay" hidden role="status" aria-live="polite">
+    <div class="audio-compile-card">
+      <div class="audio-compile-spinner"></div>
+      <h2>Preparing tournament audio</h2>
+      <p id="audioCompileMessage" class="panel-help" style="margin-top:9px">Checking tournament schedule…</p>
+      <div class="audio-compile-track"><div id="audioCompileProgress"></div></div>
+      <strong id="audioCompilePercent">0%</strong>
+    </div>
+  </div>
+
   <main class="app-container">
     <header class="app-heading">
       <h1>NTL Match Tools</h1>
@@ -1070,9 +1087,9 @@
             <div id="liveClockCaption" class="small muted" style="margin-top:8px">ELAPSED PLAYING TIME</div>
           </div>
           <div style="border-top:1px solid var(--border,#ddd);padding-top:14px;display:flex;justify-content:space-between;align-items:center;gap:12px"><div><div class="small muted">NEXT FIXTURE TIME SLOT</div><strong id="liveNextSlot">—</strong></div><div id="liveNextCountdown" style="font-size:1.5rem;font-weight:750;font-variant-numeric:tabular-nums">—</div></div>
-          <div id="liveControlRow" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-primary" id="btnPauseResume">Pause</button><button type="button" class="btn-outline" id="btnCancelTimer">Cancel timer</button></div>
+          <div id="liveControlRow" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-outline" id="btnCancelTimer">Cancel tournament</button></div>
           <div id="liveCompletionActions" hidden style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><button type="button" class="btn-primary" id="btnCloseCompleted">Close</button></div>
-          <p class="small muted" id="liveRecoveryNote" style="margin-top:12px">Timer state is timestamp-driven and will recover when you return to the app. Browser background audio depends on device and browser support.</p>
+          <p class="small muted" id="liveRecoveryNote" style="margin-top:12px">Audio is pre-scheduled as one continuous Web Audio programme. Background playback must be validated on each supported device/browser.</p>
         </div>
       </section>
       <section id="timerSetupTab" class="timer-tab">
@@ -1092,7 +1109,7 @@
               <input id="setupInterval" type="range" min="5" max="20" step="1" value="5">
               <div class="range-value"><span>Duration</span><output id="setupIntervalValue" for="setupInterval">5 minutes</output></div>
             </div>
-            <div class="setup-field"><label class="control-label" for="setupSlots">Fixture time slot #</label><input id="setupSlots" class="form-control" type="number" min="1" max="100" step="1" value="1"></div>
+            <div class="setup-field"><label class="control-label" for="setupSlots">Time Slots</label><input id="setupSlots" class="form-control" type="number" min="1" max="100" step="1" value="1"></div>
             <div class="setup-field"><label class="control-label" for="setupAudioMode">Audio mode</label><select id="setupAudioMode" class="form-control"><option value="announced">Announced Fixtures</option><option value="hooters-only">Hooters Only</option></select></div>
           </div>
           <p id="setupValidation" class="small muted" aria-live="polite">Settings are saved automatically. Confirm them to review your tournament before starting.</p>
@@ -1658,13 +1675,12 @@
       const AUDIO_PATHS = {
         warning60: "audio/warning-60.mp3",
         fieldCall: "audio/field-of-play.mp3",
-        warningBeeps: "audio/warning-beeps.mp3",
         warning30: "audio/warning-30.mp3",
         standby: "audio/standby.mp3",
         hooter: "audio/hooter.mp3"
       };
 
-      const FIRED_KEY = "ntlTournamentAudioFiredV3";
+      const FIRED_KEY = "ntlTournamentAudioFiredV2";
       const WARNING_60_CLIP_MS = 3474;
       const WARNING_60_LEAD_MS = 60000;
       const LATE_EVENT_LIMIT_MS = 2500;
@@ -1675,12 +1691,6 @@
       let fired = new Set();
       let pendingEvents = new Map();
       let audioElements = {};
-      let audioContext = null;
-      let decodedBuffers = new Map();
-      let scheduledEvents = new Map();
-      let audioReady = false;
-      let audioLoadError = null;
-      let preloadPromise = null;
       let pollHandle = null;
       let unsubscribe = null;
       let lastSnapshot = null;
@@ -1689,7 +1699,7 @@
       let soundCheckAbort = false;
       let soundCheckBusy = false;
       let soundCheckLog = [];
-      let soundCheckAudio = null;
+      let playbackQueue = Promise.resolve();
 
       function readFired() {
         try {
@@ -1707,106 +1717,74 @@
         }
       }
 
-      // Live tournament audio uses one Web Audio timeline. Every clip is
-      // decoded before play and scheduled against the timer engine's absolute
-      // timestamps. Sound Check continues to use its own isolated media element.
-      function getAudioContext() {
-        if (audioContext) return audioContext;
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        if (!Ctx) throw new Error("Web Audio is not supported by this browser.");
-        audioContext = new Ctx({ latencyHint: "interactive" });
-        return audioContext;
-      }
-
-      function preloadAudio() {
-        if (audioReady) return Promise.resolve(true);
-        if (preloadPromise) return preloadPromise;
-
-        // Creating/decoding the audio context does not attempt playback. It is
-        // safe to do this while the organiser is configuring the tournament.
-        // iOS playback permission is handled separately by unlock() on Start.
-        const context = getAudioContext();
-        audioLoadError = null;
-        preloadPromise = (async () => {
-          try {
-            for (const [key, path] of Object.entries(AUDIO_PATHS)) {
-              if (decodedBuffers.has(key)) continue;
-              const response = await fetch(new URL(path, document.baseURI).href, { cache: "force-cache" });
-              if (!response.ok) throw new Error(`${path} returned HTTP ${response.status}.`);
-              const bytes = await response.arrayBuffer();
-              const buffer = await context.decodeAudioData(bytes.slice(0));
-              decodedBuffers.set(key, buffer);
-            }
-            audioReady = true;
-            return true;
-          } catch (error) {
-            audioReady = false;
-            audioLoadError = error?.message || String(error);
-            console.error("Tournament audio preload failed:", error);
-            throw error;
-          } finally {
-            preloadPromise = null;
-          }
-        })();
-        return preloadPromise;
-      }
-
-      function preload() {
-        try {
-          return preloadAudio().then(() => getStatus());
-        } catch (error) {
-          audioLoadError = error?.message || String(error);
-          return Promise.reject(error);
-        }
-      }
+      // Use ONE persistent HTMLAudioElement for every clip. iOS Safari can
+      // reject playback when a different Audio element is created and played
+      // later outside the original user gesture. Reusing the same element
+      // keeps the playback permission associated with the organiser's tap.
+      let sharedAudioElement = null;
 
       function configure(paths = {}) {
         Object.keys(AUDIO_PATHS).forEach(key => {
           if (typeof paths[key] === "string" && paths[key].trim()) {
             AUDIO_PATHS[key] = paths[key].trim();
-            decodedBuffers.delete(key);
           }
         });
-        audioReady = false;
-        audioLoadError = null;
-        preloadPromise = null;
+        if (sharedAudioElement) {
+          try { sharedAudioElement.pause(); sharedAudioElement.src = AUDIO_PATHS.hooter; sharedAudioElement.load(); } catch (_) {}
+        }
         return getStatus();
       }
 
       function ensureAudio() {
-        try { getAudioContext(); } catch (error) { audioLoadError = error.message; }
+        if (typeof Audio === "undefined") return;
+        if (!sharedAudioElement) {
+          sharedAudioElement = new Audio();
+          sharedAudioElement.preload = "auto";
+          sharedAudioElement.playsInline = true;
+        }
+        Object.keys(AUDIO_PATHS).forEach(key => { audioElements[key] = sharedAudioElement; });
       }
 
       function unlock() {
-        // IMPORTANT FOR iOS: call resume() on EVERY Start-button gesture,
-        // synchronously and before returning a promise. Do not reuse an
-        // earlier unlock promise: an earlier setup-screen tap may have been
-        // unable to grant playback permission, but the Start tap can.
-        let context;
-        let resumePromise;
+        // Call from a direct user interaction. iOS Safari requires this
+        // gesture before it will allow later scheduled audio playback.
+        ensureAudio();
+        const element = audioElements.hooter || new Audio();
+        const wasMuted = element.muted;
+        const previousVolume = element.volume;
+
+        element.muted = true;
+        element.volume = 0;
+
+        let attempt;
         try {
-          context = getAudioContext();
-          resumePromise = context.resume();
+          attempt = element.play();
         } catch (error) {
-          unlocked = false;
-          audioLoadError = error?.message || String(error);
+          element.muted = wasMuted;
+          element.volume = previousVolume;
           return Promise.resolve(false);
         }
 
-        return Promise.all([Promise.resolve(resumePromise), preloadAudio()])
-          .then(() => {
-            unlocked = context.state === "running" && audioReady;
-            if (!unlocked && !audioLoadError) {
-              audioLoadError = `Audio context is ${context.state}; it must be running before the tournament can start.`;
-            }
-            return unlocked;
-          })
-          .catch(error => {
-            unlocked = false;
-            audioLoadError = error?.message || String(error);
-            console.warn("Tournament audio could not be prepared:", error);
+        if (attempt && typeof attempt.then === "function") {
+          return attempt.then(() => {
+            element.pause();
+            try { element.currentTime = 0; } catch (_) {}
+            element.muted = wasMuted;
+            element.volume = previousVolume;
+            unlocked = true;
+            return true;
+          }).catch(() => {
+            element.muted = wasMuted;
+            element.volume = previousVolume;
             return false;
           });
+        }
+
+        element.pause();
+        element.muted = wasMuted;
+        element.volume = previousVolume;
+        unlocked = true;
+        return Promise.resolve(true);
       }
 
       function installUnlockGesture() {
@@ -1880,13 +1858,8 @@
                 clip: "fieldCall"
               },
               {
-                id: `${token}:warningBeeps`,
-                at: playStartAt - 30000,
-                clip: "warningBeeps"
-              },
-              {
                 id: `${token}:warning30`,
-                at: playStartAt - 30000 + ((decodedBuffers.get("warningBeeps")?.duration || 2.5) * 1000),
+                at: playStartAt - 30000,
                 clip: "warning30"
               },
               {
@@ -1919,60 +1892,79 @@
         return events;
       }
 
-      function scheduleAudioEvent(event) {
-        if (!enabled || !unlocked || !audioReady || fired.has(event.id) || scheduledEvents.has(event.id)) return false;
-        const context = audioContext;
-        const buffer = decodedBuffers.get(event.clip);
-        if (!context || !buffer) {
-          console.warn("Tournament audio asset is not ready:", event.clip);
-          return false;
-        }
-        const delayMs = event.at - Date.now();
-        if (delayMs < -LATE_EVENT_LIMIT_MS) {
+      function playEvent(event) {
+        const task = playbackQueue.then(() => playEventNow(event));
+        playbackQueue = task.catch(() => false);
+        return task;
+      }
+
+      async function playEventNow(event) {
+        if (!enabled || !unlocked || fired.has(event.id)) return false;
+
+        ensureAudio();
+        const audio = sharedAudioElement;
+        if (!audio || !AUDIO_PATHS[event.clip]) return false;
+
+        try {
+          audio.pause();
+          const nextSource = new URL(AUDIO_PATHS[event.clip], document.baseURI).href;
+          if (audio.src !== nextSource) {
+            audio.src = nextSource;
+            audio.load();
+          }
+          try { audio.currentTime = 0; } catch (_) {}
+          // This function is deliberately called synchronously for the first
+          // Sound Check clip from the button handler, before any await/queue.
+          await audio.play();
+          // Do not start another clip until this one has finished. The
+          // fallback prevents a missing ended event from blocking the queue.
+          await new Promise(resolve => {
+            let settled = false;
+            const finish = () => { if (!settled) { settled = true; audio.removeEventListener("ended", finish); clearTimeout(fallback); resolve(); } };
+            const fallback = setTimeout(finish, Math.max(2500, (Number.isFinite(audio.duration) ? audio.duration * 1000 : 7000) + 1500));
+            audio.addEventListener("ended", finish, { once: true });
+          });
           fired.add(event.id);
           persistFired();
-          console.warn("Tournament audio event missed; it was discovered after its scheduled time:", event.clip, { lateByMs: -delayMs });
-          return false;
-        }
-        try {
-          const source = context.createBufferSource();
-          source.buffer = buffer;
-          source.connect(context.destination);
-          const startAt = context.currentTime + Math.max(0, delayMs / 1000);
-          scheduledEvents.set(event.id, { source, event, startAt });
-          source.onended = () => {
-            // stop() is also used to cancel future events on pause/reset.
-            // A cancelled source must not be recorded as successfully fired.
-            if (!scheduledEvents.has(event.id)) return;
-            scheduledEvents.delete(event.id);
-            fired.add(event.id);
-            persistFired();
-          };
-          source.start(startAt);
           return true;
         } catch (error) {
-          console.error(`Tournament audio scheduling failed (${event.clip}):`, error);
-          return false;
+          fired.add(event.id);
+          persistFired();
+          const detail = `${error?.name || "PlaybackError"}: ${error?.message || String(error)}`;
+          console.warn(`Tournament audio playback failed (${event.clip}): ${detail}`, error);
+          return { ok: false, error: detail };
         }
       }
 
       function processDue(snapshot) {
         if (!active || !enabled || !["running", "completed"].includes(snapshot?.status)) return;
-        if (snapshot.status === "running") {
-          const events = scheduleFor(snapshot);
-          events.forEach(event => {
-            if (!fired.has(event.id) && !scheduledEvents.has(event.id)) {
-              pendingEvents.set(event.id, event);
-            }
-          });
-        }
 
-        // Schedule future events immediately on discovery. The browser's
-        // audio clock, not a JavaScript interval, determines their start time.
-        for (const [id, event] of [...pendingEvents.entries()]) {
-          if (fired.has(id)) { pendingEvents.delete(id); continue; }
-          if (scheduleAudioEvent(event)) pendingEvents.delete(id);
-        }
+        if (snapshot.status === "running") addEvents(scheduleFor(snapshot));
+
+        const currentTime = Date.now();
+        const due = [...pendingEvents.values()]
+          .filter(event => currentTime >= event.at)
+          .sort((a, b) => a.at - b.at);
+
+        due.forEach(event => {
+          pendingEvents.delete(event.id);
+
+          if (fired.has(event.id)) return;
+
+          if (currentTime - event.at <= LATE_EVENT_LIMIT_MS) {
+            if (!unlocked) {
+              fired.add(event.id);
+              persistFired();
+              console.warn("Tournament audio event could not play because audio has not been unlocked:", event.clip);
+              return;
+            }
+            playEvent(event);
+          } else {
+            fired.add(event.id);
+            persistFired();
+            console.warn("Tournament audio event missed while page was suspended:", event.clip);
+          }
+        });
       }
 
       function onSnapshot(snapshot) {
@@ -1986,15 +1978,9 @@
           processDue(snapshot);
           pendingEvents.clear();
         } else if (snapshot?.status === "idle" || snapshot?.status === "paused") {
-          // A pause changes the phase end timestamp on resume. Cancel future
-          // scheduled audio and rebuild against the resumed absolute timeline.
+          // A pause changes the phase end timestamp on resume. Discard old
+          // pending warning times; the resumed snapshot will schedule fresh IDs.
           pendingEvents.clear();
-          for (const [id, item] of [...scheduledEvents.entries()]) {
-            if (item.startAt > (audioContext?.currentTime || 0) + 0.03) {
-              try { item.source.stop(); } catch (_) {}
-              scheduledEvents.delete(id);
-            }
-          }
         }
       }
 
@@ -2043,36 +2029,26 @@
         if (unsubscribe) unsubscribe();
         unsubscribe = null;
 
-        for (const [id, item] of [...scheduledEvents.entries()]) {
-          try { item.source.stop(); } catch (_) {}
-          scheduledEvents.delete(id);
-        }
-        pendingEvents.clear();
+        if (sharedAudioElement) { try { sharedAudioElement.pause(); } catch (_) {} }
+
         return getStatus();
       }
 
       function setEnabled(value) {
         enabled = Boolean(value);
-        if (!enabled) {
-          pendingEvents.clear();
-          for (const [id, item] of [...scheduledEvents.entries()]) {
-            try { item.source.stop(); } catch (_) {}
-            scheduledEvents.delete(id);
-          }
-        }
+        if (!enabled) pendingEvents.clear();
         return getStatus();
       }
 
       function resetHistory() {
         fired.clear();
         pendingEvents.clear();
-        scheduledEvents.clear();
         persistFired();
         return getStatus();
       }
 
       function getClipLabel(clip) {
-        return ({ warning60: "60-second warning", fieldCall: "Field-of-play call", warningBeeps: "Five warning beeps", warning30: "30-second announcement", standby: "Standby", hooter: "Hooter" })[clip] || clip;
+        return ({ warning60: "60-second warning", fieldCall: "Field-of-play call", warning30: "30-second warning", standby: "Standby", hooter: "Hooter" })[clip] || clip;
       }
 
       async function runSoundCheck(kind = "full", audioMode = "announced", onUpdate = () => {}) {
@@ -2086,53 +2062,46 @@
           soundCheckLog.push(item);
           try { onUpdate({ running: soundCheckBusy, log: [...soundCheckLog], item }); } catch (_) {}
         };
-        const waitForClip = (audio, clip) => new Promise(async (resolve, reject) => {
-          let settled = false;
-          const finish = (error) => {
-            if (settled) return;
-            settled = true;
-            audio.removeEventListener("ended", onEnded);
-            audio.removeEventListener("error", onError);
-            audio.removeEventListener("pause", onPause);
-            clearTimeout(fallback);
-            error ? reject(error) : resolve();
-          };
-          const onEnded = () => finish();
-          const onError = () => finish(new Error(`The ${clip} audio file could not be loaded or decoded.`));
-          const onPause = () => { if (soundCheckAbort) finish(new Error("Sound Check stopped by organiser.")); };
-          const fallback = setTimeout(() => finish(new Error(`The ${clip} audio file did not finish playing.`)), 15000);
-          audio.addEventListener("ended", onEnded, { once: true });
-          audio.addEventListener("error", onError, { once: true });
-          audio.addEventListener("pause", onPause);
-          try {
-            audio.src = new URL(AUDIO_PATHS[clip], document.baseURI).href;
-            audio.load();
-            audio.currentTime = 0;
-            await audio.play();
-          } catch (error) { finish(error); }
-        });
         try {
-          // Sound Check owns a separate media element. It does not use the
-          // live controller queue, fired-event IDs, or persistent history.
-          soundCheckAudio = new Audio();
-          soundCheckAudio.preload = "auto";
+          ensureAudio();
+          // The first audible play() must happen in the original tap gesture.
+          // Do not await a muted unlock attempt first: iOS Safari can discard
+          // user activation across that asynchronous boundary.
+          unlocked = true;
           const mode = audioMode === "hooters-only" ? "hooters-only" : "announced";
-          const clips = kind === "hooter"
-            ? ["hooter"]
-            : mode === "announced"
-              ? ["warning60", "fieldCall", "warningBeeps", "warning30", "standby", "hooter"]
-              : ["hooter"];
+          const base = Date.now() + 1000;
+          const mock = {
+            status: "running", audioMode: mode, gameIndex: 0,
+            game: { id: `sound-check-${runId}`, halves: 2 },
+            phase: { type: mode === "announced" ? "pre-game-warning" : "half-1" },
+            phaseStartedAt: mode === "announced" ? base - 65000 : base,
+            phaseEndsAt: base
+          };
+          let events = scheduleFor(mock);
+          if (kind === "hooter") events = [{ id: `sound-check-${runId}:hooter`, at: base, clip: "hooter" }];
+          // The same production scheduler creates this event list. For the
+          // operational check, preserve its order but compress the gaps.
+          const ordered = events.slice().sort((a,b) => a.at - b.at);
+          if (kind === "full" && mode === "announced" && ordered.length !== 5) throw new Error("The announced sequence did not produce all five expected events.");
+          if (kind === "full" && mode === "hooters-only" && ordered.length !== 1) throw new Error("Hooters Only should produce one start hooter.");
           record("info", `${kind === "hooter" ? "Hooter-only check" : "Quick sound check"} started (${mode === "announced" ? "Announced Fixtures" : "Hooters Only"}).`);
-          for (let i = 0; i < clips.length; i++) {
-            if (soundCheckAbort || runId !== soundCheckRunId) {
-              record("stopped", "Test stopped by organiser.");
-              return { passed: false, stopped: true, log: [...soundCheckLog] };
-            }
-            const clip = clips[i];
-            record("playing", getClipLabel(clip));
-            await waitForClip(soundCheckAudio, clip);
-            record("pass", `${getClipLabel(clip)} playback completed.`);
-            if (i < clips.length - 1) await new Promise(resolve => setTimeout(resolve, 450));
+          for (let i = 0; i < ordered.length; i++) {
+            if (soundCheckAbort || runId !== soundCheckRunId) { record("stopped", "Test stopped by organiser."); return { passed: false, stopped: true, log: [...soundCheckLog] }; }
+            const event = ordered[i];
+            record("playing", getClipLabel(event.clip));
+            const checkEvent = { ...event, id: `sound-check-${runId}:${event.clip}:${i}` };
+            // First clip starts immediately in the click call stack. Later
+            // clips use the same persistent media element and serial queue.
+            const result = i === 0
+              ? playEventNow(checkEvent)
+              : playEvent(checkEvent);
+            const playback = await result;
+            const ok = playback === true;
+            record(ok ? "pass" : "fail", ok
+              ? `${getClipLabel(event.clip)} playback completed.`
+              : `${getClipLabel(event.clip)} playback failed: ${playback?.error || "unknown playback error"}.`);
+            if (!ok) throw new Error(`Playback failed: ${getClipLabel(event.clip)} — ${playback?.error || "unknown playback error"}`);
+            if (i < ordered.length - 1) await new Promise(resolve => setTimeout(resolve, kind === "hooter" ? 0 : 650));
           }
           record("pass", "Sound Check completed. Confirm the sound is audible at the required volume.");
           return { passed: true, log: [...soundCheckLog] };
@@ -2140,20 +2109,14 @@
           record("fail", error.message || "Sound Check failed.");
           return { passed: false, error: error.message, log: [...soundCheckLog] };
         } finally {
-          if (runId === soundCheckRunId) {
-            soundCheckBusy = false;
-            soundCheckAbort = false;
-            soundCheckAudio = null;
-          }
+          if (runId === soundCheckRunId) { soundCheckBusy = false; soundCheckAbort = false; }
           try { onUpdate({ running: soundCheckBusy, log: [...soundCheckLog], complete: true }); } catch (_) {}
         }
       }
 
       function stopSoundCheck() {
         soundCheckAbort = true;
-        if (soundCheckAudio) {
-          try { soundCheckAudio.pause(); soundCheckAudio.currentTime = 0; } catch (_) {}
-        }
+        if (sharedAudioElement) { try { sharedAudioElement.pause(); sharedAudioElement.currentTime = 0; } catch (_) {} }
         return { stopped: true };
       }
 
@@ -2164,7 +2127,7 @@
           game: { id: "validation-game", halves: 2 }, phase: { type: "half-time" },
           phaseStartedAt: target - 120000, phaseEndsAt: target };
         const secondHalf = scheduleFor(snapshot).sort((a,b) => a.at - b.at);
-        const expectedAnnounced = ["warning60", "fieldCall", "warningBeeps", "warning30", "standby", "hooter"];
+        const expectedAnnounced = ["warning60", "fieldCall", "warning30", "standby", "hooter"];
         const expectedHooters = ["hooter"];
         const expected = mode === "announced" ? expectedAnnounced : expectedHooters;
         const secondHalfOrder = secondHalf.map(e => e.clip);
@@ -2175,8 +2138,7 @@
           const byClip = Object.fromEntries(secondHalf.map(e => [e.clip, e.at]));
           check("60-second warning offset", byClip.warning60 === target - 63474, "Starts 63.474 seconds before play; includes the recorded clip lead-in.");
           check("Field-of-play call offset", byClip.fieldCall === target - 57000, "Starts 57 seconds before play.");
-          check("Five warning beeps offset", byClip.warningBeeps === target - 30000, "Beep file is queued at the 30-second warning point, before the spoken announcement.");
-          check("30-second warning follows beeps", byClip.warning30 > byClip.warningBeeps, "The spoken announcement starts after the five-beep recording finishes.");
+          check("30-second warning offset", byClip.warning30 === target - 30000, "Starts 30 seconds before play.");
           check("Standby offset", byClip.standby === target - 10000, "Starts 10 seconds before play.");
         }
         const firstHalfEnd = scheduleFor({ ...snapshot, phase: { type: "half-1" }, phaseEndsAt: target - 120000, phaseStartedAt: target - 240000 });
@@ -2199,6 +2161,136 @@
         return { passed, checks, summary: `${checks.filter(c => c.pass).length}/${checks.length} checks passed.` };
       }
 
+      // Continuous programme prototype: decode every clip before the tournament,
+      // then schedule all AudioBufferSourceNodes against one AudioContext clock.
+      // No JavaScript timer is needed to launch individual announcements.
+      let programmeContext = null;
+      let programmeSources = [];
+      let programmeEvents = [];
+      let programmePrepared = false;
+      let programmeRunning = false;
+      let programmeModeActive = false;
+      const programmeDurations = {};
+
+      function beginProgrammePreparation() {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) throw new Error("This browser does not support Web Audio required for the continuous audio programme.");
+        if (!programmeContext || programmeContext.state === "closed") programmeContext = new AudioContextClass();
+        // Invoke resume synchronously from the Start button gesture.
+        const resumePromise = programmeContext.resume();
+        return resumePromise;
+      }
+
+      function buildProgrammeEvents(games, audioMode) {
+        const events = [];
+        let cursor = 0;
+        const add = (offsetMs, clip, label) => events.push({ offsetMs, clip, label });
+        games.forEach((game, index) => {
+          if (audioMode === "announced") {
+            const playStart = cursor + 65000;
+            add(playStart - 60000 - WARNING_60_CLIP_MS, "warning60", `Fixture ${index + 1}: 60-second warning`);
+            add(playStart - 57000, "fieldCall", `Fixture ${index + 1}: field-of-play call`);
+            add(playStart - 30000, "warning30", `Fixture ${index + 1}: 30-second warning`);
+            add(playStart - 10000, "standby", `Fixture ${index + 1}: standby`);
+            add(playStart, "hooter", `Fixture ${index + 1}: start hooter`);
+            cursor = playStart;
+          } else {
+            add(cursor, "hooter", `Fixture ${index + 1}: start hooter`);
+          }
+          cursor += game.halfDurationSeconds * 1000;
+          add(cursor, "hooter", `Fixture ${index + 1}: first-half hooter`);
+          if (game.halves === 2) {
+            const playStart = cursor + game.halfTimeSeconds * 1000;
+            if (audioMode === "announced") {
+              add(playStart - 60000 - WARNING_60_CLIP_MS, "warning60", `Fixture ${index + 1}: second-half 60-second warning`);
+              add(playStart - 57000, "fieldCall", `Fixture ${index + 1}: second-half field-of-play call`);
+              add(playStart - 30000, "warning30", `Fixture ${index + 1}: second-half 30-second warning`);
+              add(playStart - 10000, "standby", `Fixture ${index + 1}: second-half standby`);
+            }
+            add(playStart, "hooter", `Fixture ${index + 1}: second-half start hooter`);
+            cursor = playStart + game.halfDurationSeconds * 1000;
+            add(cursor, "hooter", `Fixture ${index + 1}: full-time hooter`);
+          }
+          if (game.resultRequired) {
+            cursor += 60000;
+            cursor += 120000;
+            add(cursor, "hooter", `Fixture ${index + 1}: extra-time hooter`);
+          }
+          cursor += (game.resultRequired ? 600 : (game.intervalAfterSeconds || 0)) * 1000;
+        });
+        return events.sort((a,b) => a.offsetMs - b.offsetMs);
+      }
+
+      async function compileProgramme(games, audioMode, onProgress = () => {}) {
+        if (!programmeContext) throw new Error("Audio preparation has not been initiated by the Start button.");
+        programmePrepared = false;
+        programmeRunning = false;
+        programmeModeActive = true;
+        programmeSources.forEach(source => { try { source.stop(); } catch (_) {} });
+        programmeSources = [];
+        const events = buildProgrammeEvents(games, audioMode);
+        if (!events.length) throw new Error("No audio events were generated.");
+        const uniqueClips = [...new Set(events.map(event => event.clip))];
+        const buffers = {};
+        const report = (percent, message) => { try { onProgress(percent, message); } catch (_) {} };
+        report(8, "Validating tournament schedule…");
+        for (let i = 0; i < uniqueClips.length; i++) {
+          const clip = uniqueClips[i];
+          const response = await fetch(new URL(AUDIO_PATHS[clip], document.baseURI), { cache: "no-store" });
+          if (!response.ok) throw new Error(`Audio file could not be loaded: ${AUDIO_PATHS[clip]} (${response.status}).`);
+          const data = await response.arrayBuffer();
+          buffers[clip] = await programmeContext.decodeAudioData(data.slice(0));
+          programmeDurations[clip] = buffers[clip].duration * 1000;
+          report(15 + Math.round(((i + 1) / uniqueClips.length) * 65), `Loaded and checked ${clip}…`);
+        }
+        for (let i = 0; i < events.length; i++) {
+          const event = events[i];
+          if (!buffers[event.clip]) throw new Error(`Missing decoded audio for ${event.clip}.`);
+          const end = event.offsetMs + programmeDurations[event.clip];
+          const next = events[i + 1];
+          if (next && end > next.offsetMs + 15) throw new Error(`Audio clips overlap: ${event.label} and ${next.label}.`);
+        }
+        if (events.some(event => !Number.isFinite(event.offsetMs) || event.offsetMs < 0)) throw new Error("The programme contains an invalid event time.");
+        report(90, "Checking event order and playback schedule…");
+        programmeEvents = events.map(event => ({ ...event }));
+        programmeContext._ntlBuffers = buffers;
+        programmePrepared = true;
+        report(100, `${events.length} audio events compiled and validated.`);
+        return { eventCount: events.length, durationMs: events.length ? events[events.length - 1].offsetMs + programmeDurations[events[events.length - 1].clip] : 0 };
+      }
+
+      function startProgramme(timerStartedAt) {
+        if (!programmePrepared || !programmeContext) throw new Error("The audio programme has not been compiled.");
+        if (programmeContext.state !== "running") throw new Error("The browser audio engine is not running. Please cancel and try again.");
+        const elapsedMs = Math.max(0, Date.now() - timerStartedAt);
+        const contextStart = programmeContext.currentTime + elapsedMs / 1000 + 0.08;
+        programmeSources = [];
+        programmeEvents.forEach(event => {
+          const source = programmeContext.createBufferSource();
+          source.buffer = programmeContext._ntlBuffers?.[event.clip] || null;
+          if (!source.buffer) throw new Error(`Audio buffer unavailable for ${event.clip}.`);
+          source.connect(programmeContext.destination);
+          const when = contextStart + event.offsetMs / 1000;
+          if (when < programmeContext.currentTime) throw new Error(`Audio event is already late: ${event.label}.`);
+          source.start(when);
+          programmeSources.push(source);
+        });
+        programmeRunning = true;
+        programmeModeActive = true;
+        return { scheduledEvents: programmeSources.length };
+      }
+
+      function cancelProgramme() {
+        programmeSources.forEach(source => { try { source.stop(); } catch (_) {} });
+        programmeSources = [];
+        programmeEvents = [];
+        programmePrepared = false;
+        programmeRunning = false;
+        programmeModeActive = false;
+        if (programmeContext && programmeContext.state === "running") programmeContext.suspend().catch(() => {});
+        return true;
+      }
+
       function getStatus() {
         return {
           enabled,
@@ -2206,19 +2298,15 @@
           active,
           audioFiles: { ...AUDIO_PATHS },
           firedCount: fired.size,
-          pendingCount: pendingEvents.size,
-          scheduledCount: scheduledEvents.size,
-          audioReady,
-          audioContextState: audioContext?.state || "unavailable",
-          audioLoadError
+          pendingCount: pendingEvents.size
         };
       }
 
       readFired();
+      ensureAudio();
 
       return Object.freeze({
         configure,
-        preload,
         unlock,
         start,
         stop,
@@ -2227,6 +2315,10 @@
         runSoundCheck,
         stopSoundCheck,
         validateSequence,
+        beginProgrammePreparation,
+        compileProgramme,
+        startProgramme,
+        cancelProgramme,
         getStatus
       });
     })();
@@ -3159,16 +3251,13 @@
       const setBusy = busy => { fullBtn.disabled = hooterBtn.disabled = validateBtn.disabled = busy; stopBtn.disabled = !busy; };
       const run = async kind => {
         setBusy(true); statusEl.textContent = "Preparing audio…"; reportEl.textContent = "Starting test…";
-        try {
-          const result = await controller.runSoundCheck(kind, modeEl.value, update => {
-            renderLog(update.log || []);
-            if (update.item) statusEl.textContent = update.item.detail;
-          });
-          statusEl.textContent = result?.passed ? "Test finished. Confirm the speaker is audible." : result?.stopped ? "Sound Check stopped." : "Sound Check failed. See the report.";
-        } catch (error) {
-          statusEl.textContent = `Sound Check failed: ${error.message}`;
-          reportEl.textContent = error.message;
-        } finally { setBusy(false); }
+        await controller.runSoundCheck(kind, modeEl.value, update => {
+          renderLog(update.log || []);
+          if (update.item) statusEl.textContent = update.item.detail;
+        });
+        const last = controller.getStatus();
+        statusEl.textContent = "Test finished. Check the report and confirm the speaker is audible.";
+        setBusy(false);
       };
       fullBtn.addEventListener("click", () => run("full"));
       hooterBtn.addEventListener("click", () => run("hooter"));
@@ -3192,7 +3281,6 @@
       let lastSnapshot = TournamentTimerEngine.getSnapshot();
       let wakeLock = null;
       let uiHeartbeat = null;
-      let completedDismissed = false;
       const readSettings = () => ({
         halves: Number($("setupHalves").value), duration: Number($("setupDuration").value),
         halfTime: Number($("setupHalfTime").value) * 60, interval: Number($("setupInterval").value) * 60,
@@ -3287,11 +3375,6 @@
       });
       async function startTournament() {
         if (!saveSettings(false)) return;
-        completedDismissed = false;
-        // Explicitly unlock live tournament audio from this Start button's
-        // user gesture. The controller's first-click listener is only a
-        // fallback; scheduled playback must not depend on it succeeding.
-        const audioUnlockPromise = TournamentAudioController.unlock();
         const v = readSettings();
         if (!["idle", "completed"].includes(TournamentTimerEngine.getSnapshot().status)) { $("setupValidation").textContent = "Cancel the current timer before starting a new tournament."; return; }
         const games = Array.from({length:v.slots}, (_, i) => ({
@@ -3300,40 +3383,50 @@
           intervalAfterSeconds: i < v.slots - 1 ? v.interval : 0,
           preGameWarningSeconds: 65, resultRequired: false
         }));
+        const overlay = $("audioCompileOverlay");
+        const message = $("audioCompileMessage");
+        const progress = $("audioCompileProgress");
+        const percent = $("audioCompilePercent");
+        const showProgress = (value, text) => { message.textContent = text; progress.style.width = `${value}%`; percent.textContent = `${value}%`; };
+        overlay.hidden = false;
+        $("btnStartTournamentLive").disabled = true;
         try {
-          const audioUnlocked = await audioUnlockPromise;
-          if (!audioUnlocked) {
-            const reason = TournamentAudioController.getStatus().audioLoadError;
-            throw new Error(`Audio is not ready, so the tournament has not started. ${reason || "Please check your sound settings and try again."}`);
-          }
+          // Resume the native browser audio clock directly inside the user's tap.
+          await TournamentAudioController.beginProgrammePreparation();
+          showProgress(5, "Validating tournament settings…");
           await TournamentTimerEngine.configure(games, {audioMode:v.audioMode, scheduleMode:"sequential"});
-          await TournamentTimerEngine.start();
+          const compiled = await TournamentAudioController.compileProgramme(games, v.audioMode, showProgress);
+          showProgress(100, `${compiled.eventCount} events ready. Starting tournament…`);
+          const started = await TournamentTimerEngine.start();
+          TournamentAudioController.startProgramme(started.phaseStartedAt);
           await requestWakeLock();
-          completedDismissed = false;
-          $("timerSetupPanel").hidden = true;
-          $("timerIdlePanel").hidden = true;
+          overlay.hidden = true;
           setTimerTab("live");
           $("timerSetupPanel").hidden = true; $("timerLivePanel").hidden = false;
           renderLive(TournamentTimerEngine.getSnapshot());
-        } catch (error) { $("setupValidation").textContent = error.message; $("setupValidation").style.color = "#b42318"; }
+        } catch (error) {
+          TournamentAudioController.cancelProgramme();
+          if (TournamentTimerEngine.getSnapshot().status === "running") await TournamentTimerEngine.cancel();
+          overlay.hidden = true;
+          $("setupValidation").textContent = `Tournament not started: ${error.message}`;
+          $("setupValidation").style.color = "#b42318";
+        } finally {
+          $("btnStartTournamentLive").disabled = false;
+        }
       }
       $("btnStartTournamentLive").addEventListener("click", startTournament);
       $("btnOpenTimerSettings").addEventListener("click", () => setTimerTab("setup"));
       $("btnCloseCompleted").addEventListener("click", () => {
-        completedDismissed = true;
         $("timerLivePanel").hidden = true;
-        $("timerIdlePanel").hidden = true;
-        $("timerSetupPanel").hidden = false;
-        setTimerTab("setup");
+        $("timerIdlePanel").hidden = false;
+        setTimerTab("live");
         renderSetupSummary();
-      });
-      $("btnPauseResume").addEventListener("click", async () => {
-        try { const snap = TournamentTimerEngine.getSnapshot(); if (snap.status === "running") { await TournamentTimerEngine.pause(); await releaseWakeLock(); } else if (snap.status === "paused") { await TournamentTimerEngine.resume(); await requestWakeLock(); } renderLive(TournamentTimerEngine.getSnapshot()); } catch (error) { $("liveRecoveryNote").textContent = error.message; }
       });
       $("btnCancelTimer").addEventListener("click", async () => {
         if (!confirm("Cancel this tournament timer? Your settings will be retained.")) return;
         try {
           await TournamentTimerEngine.cancel();
+          TournamentAudioController.cancelProgramme();
           await releaseWakeLock();
 
           // Return explicitly to the setup form. Do not render the live/idle
@@ -3353,7 +3446,7 @@
       function renderLive(snap) {
         lastSnapshot = snap;
         const running = snap.status === "running", paused = snap.status === "paused";
-        $("liveStatus").textContent = running ? "RUNNING" : paused ? "PAUSED" : snap.status.toUpperCase();
+        $("liveStatus").textContent = running ? "RUNNING" : paused ? "PAUSED — CANCEL AND RESTART" : snap.status.toUpperCase();
         $("liveSlot").textContent = `FIXTURE TIME SLOT ${Math.min(snap.gameIndex+1, Math.max(1,snap.gameCount))} OF ${snap.gameCount || readSettings().slots}`;
         const phase = snap.phase?.type || "idle";
         const elapsedPhases = ["half-1", "half-2"].includes(phase);
@@ -3374,17 +3467,11 @@
           else if (phase === "half-2") remainingToNext += (game.intervalAfterSeconds || 0) * 1000;
           $("liveNextCountdown").textContent = formatClock(remainingToNext);
         } else $("liveNextCountdown").textContent = "—";
-        $("btnPauseResume").textContent = paused ? "Resume" : "Pause";
-        $("btnPauseResume").disabled = !running && !paused;
         $("btnCancelTimer").disabled = snap.status === "idle" || completed;
         $("liveControlRow").hidden = completed;
         $("liveCompletionActions").hidden = !completed;
-        const showCompleted = completed && !completedDismissed;
-        // When completion has been dismissed, keep the ready/summary panel
-        // available on the Timer tab. Do not let the heartbeat hide or show
-        // the separate Set-up form; tab navigation owns that visibility.
-        $("timerIdlePanel").hidden = running || paused || (completed && !completedDismissed);
-        $("timerLivePanel").hidden = !(running || paused || showCompleted);
+        $("timerIdlePanel").hidden = running || completed;
+        $("timerLivePanel").hidden = !(running || paused || snap.status === "completed");
         renderHistory(snap);
       }
       function renderHistory(snap) {
@@ -3426,14 +3513,7 @@
 
       // Restore timer state independently; failures must not affect Coin Toss.
       try { await TournamentTimerEngine.restore(); } catch (error) { console.warn("Unable to restore Tournament Timer state:", error); }
-      try {
-        TournamentAudioController.start();
-        // Fetch and decode all clips while the organiser configures the event.
-        // This is deliberately separate from iOS's user-gesture unlock.
-        TournamentAudioController.preload().catch(error => {
-          console.warn("Tournament audio is not yet preloaded; Start will retry and require readiness:", error);
-        });
-      } catch (error) { console.warn("Tournament audio controller could not start:", error); }
+      try { TournamentAudioController.start(); } catch (error) { console.warn("Tournament audio controller could not start:", error); }
 
       // Load fixture metadata first so saved competition/division selections can be restored.
       await loadFixtureDatabase();
